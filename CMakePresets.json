@@ -1,0 +1,84 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": { "major": 3, "minor": 26, "patch": 0 },
+
+    "configurePresets": [
+        {
+            "name": "_base",
+            "hidden": true,
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "ENGINE_WARNINGS_AS_ERRORS": "ON"
+            }
+        },
+
+        {
+            "name": "linux-debug",
+            "inherits": "_base",
+            "displayName": "Linux Debug",
+            "generator": "Ninja",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            },
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "ENGINE_VULKAN_VALIDATION": "ON"
+            }
+        },
+        {
+            "name": "linux-release",
+            "inherits": "_base",
+            "displayName": "Linux Release",
+            "generator": "Ninja",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            },
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "ENGINE_VULKAN_VALIDATION": "OFF"
+            }
+        },
+
+        {
+            "name": "win64-debug",
+            "inherits": "_base",
+            "displayName": "Windows x64 Debug",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Windows"
+            },
+            "cacheVariables": {
+                "ENGINE_VULKAN_VALIDATION": "ON"
+            }
+        },
+        {
+            "name": "win64-release",
+            "inherits": "_base",
+            "displayName": "Windows x64 Release",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Windows"
+            },
+            "cacheVariables": {
+                "ENGINE_VULKAN_VALIDATION": "OFF"
+            }
+        }
+    ],
+
+    "buildPresets": [
+        { "name": "linux-debug",   "configurePreset": "linux-debug" },
+        { "name": "linux-release", "configurePreset": "linux-release" },
+        { "name": "win64-debug",   "configurePreset": "win64-debug",   "configuration": "Debug" },
+        { "name": "win64-release", "configurePreset": "win64-release", "configuration": "Release" }
+    ]
+}

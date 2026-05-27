@@ -1,13 +1,17 @@
-# OMC / 플러그인 산출물
+# OMC / plugin artifacts
 .omc/
 
-# 빌드 산출물
+# Build / intermediate
 build/
-Binaries/
-Intermediate/
-Saved/
 out/
 cmake-build-*/
+Intermediate/
+Binaries/
+
+# Runtime-generated
+Saved/Logs/
+Saved/Crashes/
+Saved/screenshots/
 
 # CMake
 CMakeCache.txt
@@ -16,25 +20,7 @@ CMakeUserPresets.json
 cmake_install.cmake
 install_manifest.txt
 compile_commands.json
-
-# 컴파일 산출물
-*.o
-*.obj
-*.a
-*.lib
-*.so
-*.so.*
-*.dylib
-*.dll
-*.exe
-*.pdb
-*.ilk
-*.exp
-*.idb
-
-# 셰이더 산출물
-*.spv
-*.dxil
+*.cmake.in
 
 # IDE
 .vs/
@@ -42,19 +28,25 @@ compile_commands.json
 .idea/
 *.user
 *.suo
-*.sln
-*.vcxproj*
-*.xcodeproj/
+.cache/
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# 에디터 백업
-*~
-*.swp
-*.swo
+# Compiled
+*.o
+*.obj
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.lib
+*.a
+*.exp
 
-# 로그/캐시
-*.log
-.cache/
+# Compiled shaders
+*.spv
