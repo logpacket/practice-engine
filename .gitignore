@@ -1,0 +1,60 @@
+# OMC / 플러그인 산출물
+.omc/
+
+# 빌드 산출물
+build/
+Binaries/
+Intermediate/
+Saved/
+out/
+cmake-build-*/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+
+# 컴파일 산출물
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.idb
+
+# 셰이더 산출물
+*.spv
+*.dxil
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.sln
+*.vcxproj*
+*.xcodeproj/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 에디터 백업
+*~
+*.swp
+*.swo
+
+# 로그/캐시
+*.log
+.cache/
