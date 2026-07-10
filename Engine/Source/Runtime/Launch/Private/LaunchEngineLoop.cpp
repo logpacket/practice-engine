@@ -23,6 +23,7 @@
 #include <ApplicationCore/IWindow.h>
 #include <ApplicationCore/PlatformBackend.h>
 
+#include <Asset/AssetSystem.h>
 #include <Renderer/Renderer.h>
 
 #include <string>
@@ -147,9 +148,10 @@ int LaunchEngineLoop(int /*argc*/, char** /*argv*/) {
         return -6;
     }
 
-    // 5. Renderer init + main loop.
-    FRenderer renderer;
-    if (!renderer.Init(*device, *window)) {
+    // 5. Asset system (ADR-0025) + Renderer init + main loop.
+    FAssetSystem assets(allocator);
+    FRenderer    renderer;
+    if (!renderer.Init(*device, *window, assets)) {
         ENGINE_LOG_ERROR(LogLaunch, "Renderer init failed");
         backend->DestroyDevice(device);
         ModuleLoader::UnloadModule(vkrhi_mod);

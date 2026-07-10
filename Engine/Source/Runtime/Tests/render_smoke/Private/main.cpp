@@ -22,6 +22,7 @@
 #include <ApplicationCore/IWindow.h>
 #include <ApplicationCore/PlatformBackend.h>
 
+#include <Asset/AssetSystem.h>
 #include <Renderer/Renderer.h>
 
 #include <cmath>
@@ -107,11 +108,10 @@ int main() {
     ENGINE_VERIFY(backend->CreateDevice(dev_desc, &device).ok() && device != nullptr);
 
     {
-        pe::FRenderer renderer;
-        // FIFO makes G8 deterministic: vsync backpressure holds frame N's
-        // GPU-side image_available wait until vblank while the CPU records
-        // and submits frame N+1 - the [frames_in_flight] peak reaches 2.
-        ENGINE_VERIFY(renderer.Init(*device, *window, pe::ERHIPresentMode::FIFO));
+        pe::FAssetSystem assets(allocator);
+        pe::FRenderer    renderer;
+        // FIFO keeps the run deterministic under vsync backpressure.
+        ENGINE_VERIFY(renderer.Init(*device, *window, assets, pe::ERHIPresentMode::FIFO));
 
         // Warm up frames: exercises the multi-frame ring and gives the G8
         // outstanding-frame counter time to observe the overlap.

@@ -16,6 +16,7 @@
 
 namespace pe {
 
+class FAssetSystem;
 class IRHICommandList;
 class IRHIDevice;
 class IWindow;
@@ -29,11 +30,13 @@ public:
     FRenderer& operator=(const FRenderer&) = delete;
 
     // Set up GPU resources (swapchain, offscreen targets, shaders, pipeline,
-    // vertex buffer). Returns false on any failure (errors are logged).
-    // preferred_present_mode defaults to MAILBOX (§6.f); the backend falls
-    // back to Immediate then FIFO when unsupported. Tests pass FIFO to make
-    // the G8 frames-in-flight overlap deterministic (vsync backpressure).
-    bool Init(IRHIDevice& device, IWindow& window,
+    // vertex buffer). Shader bytes load through the Asset system (ADR-0025;
+    // no direct file I/O in the Renderer). Returns false on any failure
+    // (errors are logged). preferred_present_mode defaults to MAILBOX
+    // (§6.f); the backend falls back to Immediate then FIFO when
+    // unsupported. Tests pass FIFO to make the G8 frames-in-flight overlap
+    // deterministic (vsync backpressure).
+    bool Init(IRHIDevice& device, IWindow& window, FAssetSystem& assets,
               ERHIPresentMode preferred_present_mode = ERHIPresentMode::MAILBOX);
 
     // Render one frame: acquire, build the two-pass graph, submit, present.

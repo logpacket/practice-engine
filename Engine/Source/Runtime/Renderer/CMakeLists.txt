@@ -1,7 +1,7 @@
 add_engine_module(
     NAME        Renderer
     TYPE        SHARED
-    PUBLIC_DEPS Engine::Core Engine::RHI Engine::RenderGraph
+    PUBLIC_DEPS Engine::Core Engine::RHI Engine::RenderGraph Engine::Asset
     PCH_HEADER  Private/RendererPCH.h
 )
 

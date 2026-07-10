@@ -89,6 +89,7 @@ add_subdirectory(Engine/Source/Runtime/RHIBackends)          # Stage 1 §6.c (Vu
 add_subdirectory(Engine/Source/Runtime/ApplicationCore)      # Stage 1 §6.d (interface)
 add_subdirectory(Engine/Source/Runtime/Platforms)            # Stage 1 §6.d (GLFW; ADR-0018/0019)
 add_subdirectory(Engine/Source/Runtime/RenderGraph)          # Stage 2 §6.d (ADR-0023)
+add_subdirectory(Engine/Source/Runtime/Asset)                # Stage 2 §6.g (ADR-0025)
 add_subdirectory(Engine/Source/Runtime/Renderer)             # Stage 1 §6.e
 add_subdirectory(Engine/Source/Runtime/Launch)               # Stage 1 §6.f
 
@@ -98,6 +99,7 @@ if(ENGINE_BUILD_TESTS)
     add_subdirectory(Engine/Source/Runtime/Tests/rhi_smoke)
     add_subdirectory(Engine/Source/Runtime/Tests/rhi_pool_smoke)   # Stage 2 §6.a
     add_subdirectory(Engine/Source/Runtime/Tests/render_smoke)     # Stage 2 §6.e (G12)
+    add_subdirectory(Engine/Source/Runtime/Tests/asset_smoke)      # Stage 2 §6.g (G13)
     add_subdirectory(Engine/Source/Runtime/Tests/app_smoke)
 endif()
 

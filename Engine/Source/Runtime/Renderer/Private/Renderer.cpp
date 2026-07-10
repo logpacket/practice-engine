@@ -1,5 +1,7 @@
 #include <Renderer/Renderer.h>
 
+#include <Asset/AssetSystem.h>
+
 #include <Core/Assert.h>
 #include <Core/Logging.h>
 #include <Core/Paths.h>
@@ -12,8 +14,6 @@
 #include <ApplicationCore/IWindow.h>
 
 #include <array>
-#include <fstream>
-#include <vector>
 
 namespace pe {
 
@@ -38,20 +38,10 @@ constexpr Vertex kTriangle[3] = {
 constexpr ERHIFormat kOffscreenColorFormat = ERHIFormat::B8G8R8A8_SRGB;
 constexpr ERHIFormat kOffscreenDepthFormat = ERHIFormat::D32_SFLOAT;
 
-std::vector<uint8> LoadShaderBytes(const std::filesystem::path& path) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) {
-        ENGINE_LOG_ERROR(LogRenderer, "Failed to open shader: {}", path.string());
-        return {};
-    }
-    const std::streamsize size = f.tellg();
-    f.seekg(0, std::ios::beg);
-    std::vector<uint8> bytes(static_cast<usize>(size));
-    if (!f.read(reinterpret_cast<char*>(bytes.data()), size)) {
-        ENGINE_LOG_ERROR(LogRenderer, "Failed to read shader: {}", path.string());
-        return {};
-    }
-    return bytes;
+// Shader loading goes through the Asset system (ADR-0025): synchronous,
+// cached blobs - no direct file I/O in the Renderer.
+FAssetBlob LoadShaderBlob(FAssetSystem& assets, const std::filesystem::path& path) {
+    return assets.LoadBytes(path.string().c_str());
 }
 
 }  // namespace
@@ -59,7 +49,7 @@ std::vector<uint8> LoadShaderBytes(const std::filesystem::path& path) {
 FRenderer::FRenderer()  = default;
 FRenderer::~FRenderer() { Shutdown(); }
 
-bool FRenderer::Init(IRHIDevice& device, IWindow& window,
+bool FRenderer::Init(IRHIDevice& device, IWindow& window, FAssetSystem& assets,
                      ERHIPresentMode preferred_present_mode) {
     device_ = &device;
     window_ = &window;
@@ -86,26 +76,24 @@ bool FRenderer::Init(IRHIDevice& device, IWindow& window,
         return false;
     }
 
-    // 3. Shaders - load from Binaries/<Platform>/<Config>/Shaders/Triangle.{vert,frag}.spv
-    const auto vs_path = FPaths::ShadersDir() / "Triangle.vert.spv";
-    const auto fs_path = FPaths::ShadersDir() / "Triangle.frag.spv";
-
-    auto vs_bytes = LoadShaderBytes(vs_path);
-    auto fs_bytes = LoadShaderBytes(fs_path);
-    if (vs_bytes.empty() || fs_bytes.empty()) {
+    // 3. Shaders - loaded through Asset (ADR-0025) from
+    //    Binaries/<Platform>/<Config>/Shaders/Triangle.{vert,frag}.spv
+    const FAssetBlob vs_blob = LoadShaderBlob(assets, FPaths::ShadersDir() / "Triangle.vert.spv");
+    const FAssetBlob fs_blob = LoadShaderBlob(assets, FPaths::ShadersDir() / "Triangle.frag.spv");
+    if (!vs_blob.valid() || !fs_blob.valid()) {
         ENGINE_LOG_ERROR(LogRenderer, "Shader binaries missing - did the Shaders build step run?");
         return false;
     }
 
     RHIShaderDesc vs_desc{};
     vs_desc.stage      = ERHIShaderStage::Vertex;
-    vs_desc.spirv      = {vs_bytes.data(), vs_bytes.size()};
+    vs_desc.spirv      = {vs_blob.data, vs_blob.size};
     vs_desc.entry_point = "main";
     vertex_shader_ = device_->CreateShader(vs_desc);
 
     RHIShaderDesc fs_desc{};
     fs_desc.stage      = ERHIShaderStage::Fragment;
-    fs_desc.spirv      = {fs_bytes.data(), fs_bytes.size()};
+    fs_desc.spirv      = {fs_blob.data, fs_blob.size};
     fs_desc.entry_point = "main";
     fragment_shader_ = device_->CreateShader(fs_desc);
 
@@ -137,21 +125,21 @@ bool FRenderer::Init(IRHIDevice& device, IWindow& window,
     // 5. Composite pipeline (§6.e, ADR-0024): fullscreen triangle sampling
     //    the offscreen color into the swapchain. No vertex input; one
     //    combined-image-sampler at slot 0.
-    auto cvs_bytes = LoadShaderBytes(FPaths::ShadersDir() / "Composite.vert.spv");
-    auto cfs_bytes = LoadShaderBytes(FPaths::ShadersDir() / "Composite.frag.spv");
-    if (cvs_bytes.empty() || cfs_bytes.empty()) {
+    const FAssetBlob cvs_blob = LoadShaderBlob(assets, FPaths::ShadersDir() / "Composite.vert.spv");
+    const FAssetBlob cfs_blob = LoadShaderBlob(assets, FPaths::ShadersDir() / "Composite.frag.spv");
+    if (!cvs_blob.valid() || !cfs_blob.valid()) {
         ENGINE_LOG_ERROR(LogRenderer, "Composite shader binaries missing");
         return false;
     }
 
     RHIShaderDesc cvs_desc{};
     cvs_desc.stage = ERHIShaderStage::Vertex;
-    cvs_desc.spirv = {cvs_bytes.data(), cvs_bytes.size()};
+    cvs_desc.spirv = {cvs_blob.data, cvs_blob.size};
     composite_vs_ = device_->CreateShader(cvs_desc);
 
     RHIShaderDesc cfs_desc{};
     cfs_desc.stage = ERHIShaderStage::Fragment;
-    cfs_desc.spirv = {cfs_bytes.data(), cfs_bytes.size()};
+    cfs_desc.spirv = {cfs_blob.data, cfs_blob.size};
     composite_fs_ = device_->CreateShader(cfs_desc);
 
     if (!composite_vs_.valid() || !composite_fs_.valid()) {

@@ -13,7 +13,8 @@
 
 #include <RenderGraph/RenderGraph.h>
 
+#include <Asset/AssetSystem.h>
+
 #include <ApplicationCore/IWindow.h>
 
 #include <array>
-#include <fstream>

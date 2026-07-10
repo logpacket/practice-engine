@@ -21,6 +21,7 @@
 #include <ApplicationCore/IWindow.h>
 #include <ApplicationCore/PlatformBackend.h>
 
+#include <Asset/AssetSystem.h>
 #include <Renderer/Renderer.h>
 
 #include <string>
@@ -111,9 +112,11 @@ int main(int /*argc*/, char** /*argv*/) {
     ENGINE_VERIFY(backend->CreateDevice(dev_desc, &device).ok());
     ENGINE_VERIFY(device != nullptr);
 
-    // --- 5. Renderer init + main loop --------------------------------------
-    FRenderer renderer;
-    ENGINE_VERIFY(renderer.Init(*device, *window));
+    // --- 5. Asset system + Renderer init + main loop ------------------------
+    // Shader bytes load through the Asset system (ADR-0025).
+    FAssetSystem assets(allocator);
+    FRenderer    renderer;
+    ENGINE_VERIFY(renderer.Init(*device, *window, assets));
 
     ENGINE_LOG_INFO(sample::LogSample, "Entering main loop (close window or press ESC to exit)");
     while (!window->ShouldClose()) {
