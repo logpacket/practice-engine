@@ -223,6 +223,17 @@ struct RHIResourceBarrier {
     ERHIResourceState after  = ERHIResourceState::Undefined;
 };
 
+// Minimal descriptor declaration (ADR-0024): one static set, combined image
+// samplers only. Bindless / BindGroup{Layout} redesign is Stage 5.
+enum class ERHIDescriptorKind : uint8 {
+    CombinedImageSampler = 0,
+};
+
+struct RHIDescriptorBinding {
+    uint32             slot = 0;
+    ERHIDescriptorKind kind = ERHIDescriptorKind::CombinedImageSampler;
+};
+
 struct RHIGraphicsPipelineDesc {
     RHIShaderHandle  vertex_shader;
     RHIShaderHandle  fragment_shader;
@@ -231,6 +242,9 @@ struct RHIGraphicsPipelineDesc {
     ERHIFormat       color_attachment_format;  // matches the render target format
     // Unknown = no depth attachment; a depth format enables depth test+write.
     ERHIFormat       depth_attachment_format = ERHIFormat::Unknown;
+    // Sampled-texture slots the pipeline's fragment stage reads (ADR-0024).
+    // Empty = no descriptor set (the Stage 1 empty pipeline layout).
+    EngineSpan<const RHIDescriptorBinding> descriptor_bindings = {nullptr, 0};
 };
 
 struct RHISwapchainDesc {

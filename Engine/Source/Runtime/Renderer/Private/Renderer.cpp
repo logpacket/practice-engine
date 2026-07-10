@@ -133,7 +133,55 @@ bool FRenderer::Init(IRHIDevice& device, IWindow& window) {
         return false;
     }
 
-    // 5. Vertex buffer (host-visible, uploaded once at creation time)
+    // 5. Composite pipeline (§6.e, ADR-0024): fullscreen triangle sampling
+    //    the offscreen color into the swapchain. No vertex input; one
+    //    combined-image-sampler at slot 0.
+    auto cvs_bytes = LoadShaderBytes(FPaths::ShadersDir() / "Composite.vert.spv");
+    auto cfs_bytes = LoadShaderBytes(FPaths::ShadersDir() / "Composite.frag.spv");
+    if (cvs_bytes.empty() || cfs_bytes.empty()) {
+        ENGINE_LOG_ERROR(LogRenderer, "Composite shader binaries missing");
+        return false;
+    }
+
+    RHIShaderDesc cvs_desc{};
+    cvs_desc.stage = ERHIShaderStage::Vertex;
+    cvs_desc.spirv = {cvs_bytes.data(), cvs_bytes.size()};
+    composite_vs_ = device_->CreateShader(cvs_desc);
+
+    RHIShaderDesc cfs_desc{};
+    cfs_desc.stage = ERHIShaderStage::Fragment;
+    cfs_desc.spirv = {cfs_bytes.data(), cfs_bytes.size()};
+    composite_fs_ = device_->CreateShader(cfs_desc);
+
+    if (!composite_vs_.valid() || !composite_fs_.valid()) {
+        ENGINE_LOG_ERROR(LogRenderer, "CreateShader (composite) failed");
+        return false;
+    }
+
+    constexpr RHIDescriptorBinding kCompositeBindings[] = {
+        {0, ERHIDescriptorKind::CombinedImageSampler},
+    };
+    RHIGraphicsPipelineDesc cp_desc{};
+    cp_desc.vertex_shader           = composite_vs_;
+    cp_desc.fragment_shader         = composite_fs_;
+    cp_desc.vertex_stride           = 0;  // fullscreen triangle from gl_VertexIndex
+    cp_desc.vertex_attributes       = {nullptr, 0};
+    cp_desc.color_attachment_format = ERHIFormat::B8G8R8A8_SRGB;  // swapchain format
+    cp_desc.descriptor_bindings     = {kCompositeBindings, 1};
+
+    composite_pipeline_ = device_->CreateGraphicsPipeline(cp_desc);
+    if (!composite_pipeline_.valid()) {
+        ENGINE_LOG_ERROR(LogRenderer, "CreateGraphicsPipeline (composite) failed");
+        return false;
+    }
+
+    sampler_ = device_->CreateSampler(RHISamplerDesc{});
+    if (!sampler_.valid()) {
+        ENGINE_LOG_ERROR(LogRenderer, "CreateSampler failed");
+        return false;
+    }
+
+    // 6. Vertex buffer (host-visible, uploaded once at creation time)
     RHIBufferDesc vb_desc{};
     vb_desc.size_bytes   = sizeof(kTriangle);
     vb_desc.usage        = ERHIBufferUsage::VertexBuffer;
@@ -247,18 +295,30 @@ void FRenderer::RecordCompositePass(IRHICommandList& cmd) {
     scissor.height = swapchain_height_;
     cmd.SetScissor(scissor);
 
-    // §6.d placeholder body: draws the triangle directly so HelloTriangle
-    // stays visually correct (G1) while the graph already schedules the real
-    // two-pass barrier chain (offscreen RenderTarget -> ShaderResource).
-    // §6.e replaces this with a fullscreen draw sampling the offscreen color.
-    cmd.SetPipeline(scene_pipeline_);
-    cmd.SetVertexBuffer(vertex_buffer_, 0);
+    // Fullscreen draw sampling the offscreen scene color (§6.e). The
+    // descriptor set behind SetTexture is static (ADR-0024): written once per
+    // (texture, sampler) pair, only bound here.
+    cmd.SetPipeline(composite_pipeline_);
+    cmd.SetTexture(0, offscreen_color_, sampler_);
     cmd.Draw(3, 0);
 
     cmd.EndRenderPass();
 }
 
 void FRenderer::RenderFrame() {
+    RenderFrameInternal(nullptr);
+}
+
+bool FRenderer::RenderFrameWithReadback(uint32 x, uint32 y, uint8 out_rgba[4]) {
+    FReadbackRequest req{};
+    req.x        = x;
+    req.y        = y;
+    req.out_rgba = out_rgba;
+    RenderFrameInternal(&req);
+    return req.ok;
+}
+
+void FRenderer::RenderFrameInternal(FReadbackRequest* readback) {
     if (!initialized_) { return; }
 
     const RHIAcquiredImage acquired = device_->AcquireNextSwapchainImage(swapchain_);
@@ -320,6 +380,17 @@ void FRenderer::RenderFrame() {
     submit.timeline_signal_value = ++frame_number_;
 
     device_->Submit(cmd_h, submit);
+
+    // G12: read the composited pixel back after the boundary submit, before
+    // present. The graph left the backbuffer in Present state; the readback
+    // restores it, so present below stays valid.
+    if (readback != nullptr) {
+        readback->ok = device_->ReadbackTexturePixel(frame_backbuffer_,
+                                                     ERHIResourceState::Present,
+                                                     readback->x, readback->y,
+                                                     readback->out_rgba).ok();
+    }
+
     device_->Present(swapchain_, image_index);
     frame_backbuffer_ = {};
 }
@@ -329,10 +400,14 @@ void FRenderer::Shutdown() {
 
     device_->WaitIdle();
 
-    if (vertex_buffer_.valid())   { device_->Destroy(vertex_buffer_);   vertex_buffer_   = {}; }
-    if (scene_pipeline_.valid())  { device_->Destroy(scene_pipeline_);  scene_pipeline_  = {}; }
-    if (fragment_shader_.valid()) { device_->Destroy(fragment_shader_); fragment_shader_ = {}; }
-    if (vertex_shader_.valid())   { device_->Destroy(vertex_shader_);   vertex_shader_   = {}; }
+    if (vertex_buffer_.valid())      { device_->Destroy(vertex_buffer_);      vertex_buffer_      = {}; }
+    if (composite_pipeline_.valid()) { device_->Destroy(composite_pipeline_); composite_pipeline_ = {}; }
+    if (composite_fs_.valid())       { device_->Destroy(composite_fs_);       composite_fs_       = {}; }
+    if (composite_vs_.valid())       { device_->Destroy(composite_vs_);       composite_vs_       = {}; }
+    if (sampler_.valid())            { device_->Destroy(sampler_);            sampler_            = {}; }
+    if (scene_pipeline_.valid())     { device_->Destroy(scene_pipeline_);     scene_pipeline_     = {}; }
+    if (fragment_shader_.valid())    { device_->Destroy(fragment_shader_);    fragment_shader_    = {}; }
+    if (vertex_shader_.valid())      { device_->Destroy(vertex_shader_);      vertex_shader_      = {}; }
     DestroyOffscreenTargets();
     device_->WaitIdle();  // drain deferred deletes before the swapchain goes
     if (swapchain_.valid())       { device_->Destroy(swapchain_);       swapchain_       = {}; }

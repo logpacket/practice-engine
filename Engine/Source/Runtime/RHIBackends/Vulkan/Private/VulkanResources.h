@@ -35,8 +35,11 @@ struct VulkanSamplerPayload {
 };
 
 struct VulkanPipelinePayload {
-    VkPipeline       pipeline = VK_NULL_HANDLE;
-    VkPipelineLayout layout   = VK_NULL_HANDLE;
+    VkPipeline            pipeline   = VK_NULL_HANDLE;
+    VkPipelineLayout      layout     = VK_NULL_HANDLE;
+    // Set layout for descriptor_bindings (ADR-0024); VK_NULL_HANDLE when the
+    // pipeline declares none (empty pipeline layout).
+    VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
 };
 
 struct VulkanSwapchainPayload {

@@ -98,6 +98,12 @@ VkSemaphore UnwrapSemaphore(RHISemaphore s) noexcept {
     return reinterpret_cast<VkSemaphore>(s.opaque);
 }
 
+// Stable identity of one handle incarnation (index + generation).
+template <typename Tag>
+uint64_t HandleKey(RHIHandle<Tag> h) noexcept {
+    return (static_cast<uint64_t>(h.generation) << 32) | h.index;
+}
+
 }  // namespace
 
 // ----- Lifecycle -----
@@ -142,6 +148,11 @@ FVulkanDevice::~FVulkanDevice() {
         if (frame_timeline_ != VK_NULL_HANDLE) {
             vkDestroySemaphore(device_, frame_timeline_, nullptr);
             frame_timeline_ = VK_NULL_HANDLE;
+        }
+        if (descriptor_pool_ != VK_NULL_HANDLE) {
+            // Frees every remaining cached set with it.
+            vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
+            descriptor_pool_ = VK_NULL_HANDLE;
         }
         vkDestroyDevice(device_, nullptr);
         device_ = VK_NULL_HANDLE;
@@ -375,7 +386,74 @@ bool FVulkanDevice::CreateFrameResources() {
                          static_cast<int>(r));
         return false;
     }
+
+    // Descriptor pool (ADR-0024): a small fixed pool for the static combined-
+    // image-sampler sets. FREE_DESCRIPTOR_SET_BIT so invalidated sets return
+    // to the pool through the deferred-delete queue.
+    VkDescriptorPoolSize pool_size{};
+    pool_size.type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    pool_size.descriptorCount = 64;
+
+    VkDescriptorPoolCreateInfo dpci{};
+    dpci.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpci.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpci.maxSets       = 64;
+    dpci.poolSizeCount = 1;
+    dpci.pPoolSizes    = &pool_size;
+    const VkResult pr = vkCreateDescriptorPool(device_, &dpci, nullptr, &descriptor_pool_);
+    if (pr != VK_SUCCESS) {
+        ENGINE_LOG_ERROR(LogVulkanRHI, "vkCreateDescriptorPool failed: VkResult {}",
+                         static_cast<int>(pr));
+        return false;
+    }
     return true;
+}
+
+VkDescriptorSet FVulkanDevice::GetOrCreateDescriptorSet(VkDescriptorSetLayout layout, uint32_t slot,
+                                                        RHITextureHandle texture,
+                                                        RHISamplerHandle sampler) {
+    const FDescriptorSetKey key{reinterpret_cast<uint64_t>(layout),
+                                HandleKey(texture), HandleKey(sampler)};
+    const auto it = descriptor_set_cache_.find(key);
+    if (it != descriptor_set_cache_.end()) { return it->second; }
+
+    VkDescriptorSetAllocateInfo ai{};
+    ai.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    ai.descriptorPool     = descriptor_pool_;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts        = &layout;
+
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    PE_VK_CHECK(vkAllocateDescriptorSets(device_, &ai, &set));
+
+    VkDescriptorImageInfo image_info{};
+    image_info.sampler     = samplers_.Get(sampler)->sampler;
+    image_info.imageView   = textures_.Get(texture)->view;
+    image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet          = set;
+    write.dstBinding      = slot;
+    write.descriptorCount = 1;
+    write.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo      = &image_info;
+    vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+
+    descriptor_set_cache_.emplace(key, set);
+    return set;
+}
+
+void FVulkanDevice::InvalidateDescriptorSets(uint64_t texture_key, uint64_t sampler_key) {
+    auto it = descriptor_set_cache_.begin();
+    while (it != descriptor_set_cache_.end()) {
+        if (it->first.texture == texture_key || it->first.sampler == sampler_key) {
+            deferred_descriptor_sets_.push_back({CurrentFrameValue(), it->second});
+            it = descriptor_set_cache_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 uint32_t FVulkanDevice::FindMemoryType(uint32_t type_bits, VkMemoryPropertyFlags properties) const {
@@ -533,8 +611,31 @@ RHIPipelineHandle FVulkanDevice::CreateGraphicsPipeline(const RHIGraphicsPipelin
 
     VulkanPipelinePayload payload;
 
+    // Descriptor set layout from descriptor_bindings (ADR-0024): fragment-
+    // stage combined image samplers only.
+    if (desc.descriptor_bindings.size > 0) {
+        std::vector<VkDescriptorSetLayoutBinding> bindings;
+        bindings.reserve(desc.descriptor_bindings.size);
+        for (uint64_t i = 0; i < desc.descriptor_bindings.size; ++i) {
+            const RHIDescriptorBinding& b = desc.descriptor_bindings.data[i];
+            VkDescriptorSetLayoutBinding vkb{};
+            vkb.binding         = b.slot;
+            vkb.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            vkb.descriptorCount = 1;
+            vkb.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+            bindings.push_back(vkb);
+        }
+        VkDescriptorSetLayoutCreateInfo dslci{};
+        dslci.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        dslci.bindingCount = static_cast<uint32_t>(bindings.size());
+        dslci.pBindings    = bindings.data();
+        PE_VK_CHECK(vkCreateDescriptorSetLayout(device_, &dslci, nullptr, &payload.set_layout));
+    }
+
     VkPipelineLayoutCreateInfo plci{};
-    plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plci.sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plci.setLayoutCount = payload.set_layout != VK_NULL_HANDLE ? 1u : 0u;
+    plci.pSetLayouts    = payload.set_layout != VK_NULL_HANDLE ? &payload.set_layout : nullptr;
     PE_VK_CHECK(vkCreatePipelineLayout(device_, &plci, nullptr, &payload.layout));
 
     const bool has_depth = desc.depth_attachment_format != ERHIFormat::Unknown;
@@ -752,6 +853,11 @@ RHISwapchainHandle FVulkanDevice::CreateSwapchain(const RHISwapchainDesc& desc) 
     sci.imageExtent      = payload.extent;
     sci.imageArrayLayers = 1;
     sci.imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    // TRANSFER_SRC (when the surface supports it) enables the G12 pixel
+    // readback of the presented image (ReadbackTexturePixel).
+    if ((caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0) {
+        sci.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    }
     sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     sci.preTransform     = caps.currentTransform;
     sci.compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -830,8 +936,9 @@ void FVulkanDevice::DestroyShaderPayload(VulkanShaderPayload& p) {
 }
 
 void FVulkanDevice::DestroyPipelinePayload(VulkanPipelinePayload& p) {
-    if (p.pipeline != VK_NULL_HANDLE) { vkDestroyPipeline(device_, p.pipeline, nullptr); p.pipeline = VK_NULL_HANDLE; }
-    if (p.layout != VK_NULL_HANDLE)   { vkDestroyPipelineLayout(device_, p.layout, nullptr); p.layout = VK_NULL_HANDLE; }
+    if (p.pipeline != VK_NULL_HANDLE)   { vkDestroyPipeline(device_, p.pipeline, nullptr); p.pipeline = VK_NULL_HANDLE; }
+    if (p.layout != VK_NULL_HANDLE)     { vkDestroyPipelineLayout(device_, p.layout, nullptr); p.layout = VK_NULL_HANDLE; }
+    if (p.set_layout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(device_, p.set_layout, nullptr); p.set_layout = VK_NULL_HANDLE; }
 }
 
 void FVulkanDevice::DestroyTexturePayload(VulkanTexturePayload& p) {
@@ -902,9 +1009,11 @@ void FVulkanDevice::Destroy(RHISwapchainHandle h) {
     DestroySwapchainPayload(p);
 }
 void FVulkanDevice::Destroy(RHITextureHandle h) {
+    InvalidateDescriptorSets(HandleKey(h), /*sampler_key=*/0);
     deferred_textures_.push_back({CurrentFrameValue(), textures_.Remove(h)});
 }
 void FVulkanDevice::Destroy(RHISamplerHandle h) {
+    InvalidateDescriptorSets(/*texture_key=*/0, HandleKey(h));
     deferred_samplers_.push_back({CurrentFrameValue(), samplers_.Remove(h)});
 }
 
@@ -925,6 +1034,9 @@ void FVulkanDevice::DrainDeferred(uint64_t completed) {
     drain(deferred_pipelines_, [this](VulkanPipelinePayload& p) { DestroyPipelinePayload(p); });
     drain(deferred_textures_,  [this](VulkanTexturePayload& p)  { DestroyTexturePayload(p); });
     drain(deferred_samplers_,  [this](VulkanSamplerPayload& p)  { DestroySamplerPayload(p); });
+    drain(deferred_descriptor_sets_, [this](VkDescriptorSet& s) {
+        vkFreeDescriptorSets(device_, descriptor_pool_, 1, &s);
+    });
 }
 
 // ----- Command lists -----
@@ -1116,6 +1228,135 @@ EngineResult FVulkanDevice::WaitIdle() {
     vkDeviceWaitIdle(device_);
     // Idle means every submitted frame completed: reclaim everything pending.
     DrainDeferred(UINT64_MAX);
+    return EngineResult::Ok();
+}
+
+EngineResult FVulkanDevice::ReadbackTexturePixel(RHITextureHandle texture, ERHIResourceState state,
+                                                 uint32_t x, uint32_t y, uint8_t out_rgba[4]) {
+    auto* tex = textures_.Get(texture);
+    if (x >= tex->extent.width || y >= tex->extent.height) {
+        return EngineResult::Fail(-1);
+    }
+
+    // Debug/verification path (gate G12): fully synchronous, stalls the queue.
+    vkDeviceWaitIdle(device_);
+
+    // 4-byte host-visible staging buffer for one texel.
+    VkBufferCreateInfo bci{};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size  = 4;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VkBuffer staging = VK_NULL_HANDLE;
+    PE_VK_CHECK(vkCreateBuffer(device_, &bci, nullptr, &staging));
+
+    VkMemoryRequirements req{};
+    vkGetBufferMemoryRequirements(device_, staging, &req);
+    const uint32_t mem_type = FindMemoryType(req.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (mem_type == UINT32_MAX) {
+        vkDestroyBuffer(device_, staging, nullptr);
+        return EngineResult::Fail(-2);
+    }
+    VkMemoryAllocateInfo mai{};
+    mai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.allocationSize  = req.size;
+    mai.memoryTypeIndex = mem_type;
+    VkDeviceMemory staging_mem = VK_NULL_HANDLE;
+    PE_VK_CHECK(vkAllocateMemory(device_, &mai, nullptr, &staging_mem));
+    PE_VK_CHECK(vkBindBufferMemory(device_, staging, staging_mem, 0));
+
+    // One-off command buffer from the current frame slot.
+    VkCommandBufferAllocateInfo cbai{};
+    cbai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cbai.commandPool        = frames_[current_slot_].pool;
+    cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    PE_VK_CHECK(vkAllocateCommandBuffers(device_, &cbai, &cmd));
+
+    VkCommandBufferBeginInfo cbbi{};
+    cbbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    PE_VK_CHECK(vkBeginCommandBuffer(cmd, &cbbi));
+
+    // state -> CopySrc, copy the texel, restore state. The caller supplies
+    // the current state (the emit-only RHI tracks none).
+    const auto layout_of = [](ERHIResourceState s) {
+        switch (s) {
+            case ERHIResourceState::RenderTarget:    return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            case ERHIResourceState::DepthAttachment: return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+            case ERHIResourceState::ShaderResource:  return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            case ERHIResourceState::CopySrc:         return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            case ERHIResourceState::CopyDst:         return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            case ERHIResourceState::Present:         return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            default:                                 return VK_IMAGE_LAYOUT_UNDEFINED;
+        }
+    };
+    const VkImageLayout current_layout = layout_of(state);
+
+    VkImageMemoryBarrier2 to_copy{};
+    to_copy.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    to_copy.srcStageMask        = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    to_copy.srcAccessMask       = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    to_copy.dstStageMask        = VK_PIPELINE_STAGE_2_COPY_BIT;
+    to_copy.dstAccessMask       = VK_ACCESS_2_TRANSFER_READ_BIT;
+    to_copy.oldLayout           = current_layout;
+    to_copy.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    to_copy.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_copy.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_copy.image               = tex->image;
+    to_copy.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    VkDependencyInfo dep{};
+    dep.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.imageMemoryBarrierCount = 1;
+    dep.pImageMemoryBarriers    = &to_copy;
+    vkCmdPipelineBarrier2(cmd, &dep);
+
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageOffset      = {static_cast<int32_t>(x), static_cast<int32_t>(y), 0};
+    region.imageExtent      = {1, 1, 1};
+    vkCmdCopyImageToBuffer(cmd, tex->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
+
+    VkImageMemoryBarrier2 restore = to_copy;
+    restore.srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT;
+    restore.srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    restore.dstStageMask  = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    restore.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    restore.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    restore.newLayout     = current_layout;
+    dep.pImageMemoryBarriers = &restore;
+    vkCmdPipelineBarrier2(cmd, &dep);
+
+    PE_VK_CHECK(vkEndCommandBuffer(cmd));
+
+    VkCommandBufferSubmitInfo cbsi{};
+    cbsi.sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    cbsi.commandBuffer = cmd;
+    VkSubmitInfo2 si2{};
+    si2.sType                  = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    si2.commandBufferInfoCount = 1;
+    si2.pCommandBufferInfos    = &cbsi;
+    PE_VK_CHECK(vkQueueSubmit2(graphics_queue_, 1, &si2, VK_NULL_HANDLE));
+    vkDeviceWaitIdle(device_);
+
+    void* mapped = nullptr;
+    PE_VK_CHECK(vkMapMemory(device_, staging_mem, 0, 4, 0, &mapped));
+    uint8_t raw[4];
+    std::memcpy(raw, mapped, 4);
+    vkUnmapMemory(device_, staging_mem);
+
+    // Return RGBA regardless of the texture's channel order.
+    const bool bgra = tex->format == VK_FORMAT_B8G8R8A8_UNORM || tex->format == VK_FORMAT_B8G8R8A8_SRGB;
+    out_rgba[0] = bgra ? raw[2] : raw[0];
+    out_rgba[1] = raw[1];
+    out_rgba[2] = bgra ? raw[0] : raw[2];
+    out_rgba[3] = raw[3];
+
+    vkFreeCommandBuffers(device_, frames_[current_slot_].pool, 1, &cmd);
+    vkDestroyBuffer(device_, staging, nullptr);
+    vkFreeMemory(device_, staging_mem, nullptr);
     return EngineResult::Ok();
 }
 

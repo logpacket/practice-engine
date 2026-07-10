@@ -36,6 +36,11 @@ public:
     // No-op if Init failed.
     void RenderFrame();
 
+    // G12 instrument: renders one frame and synchronously reads back the
+    // composited swapchain pixel (x, y) as RGBA8 right before present.
+    // Stalls the device - test/verification use only, never the steady loop.
+    bool RenderFrameWithReadback(uint32 x, uint32 y, uint8 out_rgba[4]);
+
     // Release GPU resources. Safe to call multiple times.
     void Shutdown();
 
@@ -49,15 +54,29 @@ private:
     bool CreateOffscreenTargets(uint32 width, uint32 height);
     void DestroyOffscreenTargets();
 
+    struct FReadbackRequest {
+        uint32 x = 0;
+        uint32 y = 0;
+        uint8* out_rgba = nullptr;
+        bool   ok = false;
+    };
+    void RenderFrameInternal(FReadbackRequest* readback);
+
     IRHIDevice*        device_   = nullptr;
     IWindow*           window_   = nullptr;
     bool               initialized_ = false;
 
-    RHISwapchainHandle swapchain_       = {};
-    RHIShaderHandle    vertex_shader_   = {};
-    RHIShaderHandle    fragment_shader_ = {};
-    RHIPipelineHandle  scene_pipeline_  = {};
-    RHIBufferHandle    vertex_buffer_   = {};
+    RHISwapchainHandle swapchain_          = {};
+    RHIShaderHandle    vertex_shader_      = {};
+    RHIShaderHandle    fragment_shader_    = {};
+    RHIPipelineHandle  scene_pipeline_     = {};
+    RHIBufferHandle    vertex_buffer_      = {};
+
+    // CompositePass resources (§6.e, ADR-0024).
+    RHIShaderHandle    composite_vs_       = {};
+    RHIShaderHandle    composite_fs_       = {};
+    RHIPipelineHandle  composite_pipeline_ = {};
+    RHISamplerHandle   sampler_            = {};
 
     // Offscreen scene targets (§6.d): ScenePass renders here; CompositePass
     // consumes the color target.

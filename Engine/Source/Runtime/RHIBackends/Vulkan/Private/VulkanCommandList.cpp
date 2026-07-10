@@ -172,6 +172,16 @@ void FVulkanCommandList::SetScissor(const RHIRect& rect) {
 void FVulkanCommandList::SetPipeline(RHIPipelineHandle pipeline) {
     auto* p = device_.GetPipelinePayload(pipeline);
     vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, p->pipeline);
+    bound_layout_     = p->layout;
+    bound_set_layout_ = p->set_layout;
+}
+
+void FVulkanCommandList::SetTexture(uint32_t slot, RHITextureHandle texture,
+                                    RHISamplerHandle sampler) {
+    ENGINE_CHECK(bound_set_layout_ != VK_NULL_HANDLE);  // pipeline must declare descriptor_bindings
+    VkDescriptorSet set = device_.GetOrCreateDescriptorSet(bound_set_layout_, slot, texture, sampler);
+    vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, bound_layout_,
+                            0, 1, &set, 0, nullptr);
 }
 
 void FVulkanCommandList::SetVertexBuffer(RHIBufferHandle buffer, uint64_t offset) {

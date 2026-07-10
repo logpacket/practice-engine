@@ -70,6 +70,17 @@ public:
     // --- Sync --------------------------------------------------------------
     virtual EngineResult WaitIdle() = 0;
 
+    // --- Debug / verification ----------------------------------------------
+    // Synchronously reads one pixel back as RGBA8 (gate G12 instrument).
+    // Stalls the device internally - never call in the steady loop. `state`
+    // is the texture's current resource state (the emit-only RHI does not
+    // track it); the texture is returned to that state afterwards. The
+    // texture (or swapchain) must have been created with CopySrc capability.
+    virtual EngineResult ReadbackTexturePixel(RHITextureHandle texture,
+                                              ERHIResourceState state,
+                                              uint32 x, uint32 y,
+                                              uint8 out_rgba[4]) = 0;
+
 protected:
     ~IRHIDevice() = default;  // owned by VulkanRHI module; destroyed via IRHIBackendModule::DestroyDevice
 };

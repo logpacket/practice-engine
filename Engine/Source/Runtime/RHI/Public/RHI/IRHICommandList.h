@@ -29,6 +29,11 @@ public:
     virtual void SetScissor(const RHIRect& rect) = 0;
 
     virtual void SetPipeline(RHIPipelineHandle pipeline) = 0;
+    // Binds one combined image sampler to the given slot (ADR-0024). Must be
+    // called after SetPipeline; the pipeline must declare the slot in its
+    // descriptor_bindings. The backing descriptor set is static - allocated
+    // and written on first use for a (texture, sampler) pair, then only bound.
+    virtual void SetTexture(uint32 slot, RHITextureHandle texture, RHISamplerHandle sampler) = 0;
     virtual void SetVertexBuffer(RHIBufferHandle buffer, uint64 offset = 0) = 0;
     virtual void Draw(uint32 vertex_count, uint32 first_vertex = 0) = 0;
 

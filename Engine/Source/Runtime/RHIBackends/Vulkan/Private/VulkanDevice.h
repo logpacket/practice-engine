@@ -13,6 +13,8 @@
 #include "VulkanResourcePool.h"
 #include "VulkanResources.h"
 
+#include <map>
+
 namespace pe::vk {
 
 class FVulkanCommandList;
@@ -49,6 +51,8 @@ public:
                                                 uint32_t image_index) override;
     EngineResult Present(RHISwapchainHandle swapchain, uint32_t image_index) override;
     EngineResult WaitIdle() override;
+    EngineResult ReadbackTexturePixel(RHITextureHandle texture, ERHIResourceState state,
+                                      uint32_t x, uint32_t y, uint8_t out_rgba[4]) override;
 
     // --- internal API consumed by FVulkanCommandList ---
     VulkanSwapchainPayload* GetSwapchainPayload(RHISwapchainHandle h) { return swapchains_.Get(h); }
@@ -56,6 +60,12 @@ public:
     VulkanPipelinePayload*  GetPipelinePayload(RHIPipelineHandle h)   { return pipelines_.Get(h); }
     VulkanTexturePayload*   GetTexturePayload(RHITextureHandle h)     { return textures_.Get(h); }
     VulkanSamplerPayload*   GetSamplerPayload(RHISamplerHandle h)     { return samplers_.Get(h); }
+
+    // Static descriptor set for a (layout, texture, sampler) triple
+    // (ADR-0024): allocated + written on first request, cache-hit afterwards.
+    // Invalidated (deferred-freed) when the texture or sampler is destroyed.
+    VkDescriptorSet GetOrCreateDescriptorSet(VkDescriptorSetLayout layout, uint32_t slot,
+                                             RHITextureHandle texture, RHISamplerHandle sampler);
 
     VkDevice         Device()                const noexcept { return device_; }
     VkPhysicalDevice PhysicalDevice()        const noexcept { return physical_device_; }
@@ -124,6 +134,23 @@ private:
     std::vector<FDeferred<VulkanPipelinePayload>> deferred_pipelines_;
     std::vector<FDeferred<VulkanTexturePayload>>  deferred_textures_;
     std::vector<FDeferred<VulkanSamplerPayload>>  deferred_samplers_;
+    std::vector<FDeferred<VkDescriptorSet>>       deferred_descriptor_sets_;
+
+    // --- Minimal descriptor path (ADR-0024) ---
+    VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
+    struct FDescriptorSetKey {
+        uint64_t layout;
+        uint64_t texture;
+        uint64_t sampler;
+        bool operator<(const FDescriptorSetKey& o) const noexcept {
+            if (layout != o.layout)   { return layout < o.layout; }
+            if (texture != o.texture) { return texture < o.texture; }
+            return sampler < o.sampler;
+        }
+    };
+    std::map<FDescriptorSetKey, VkDescriptorSet> descriptor_set_cache_;
+    // Deferred-frees every cached set referencing the given texture/sampler.
+    void InvalidateDescriptorSets(uint64_t texture_key, uint64_t sampler_key);
 
     PFN_RHICreateSurface     create_surface_       = nullptr;
     void*                    create_surface_userdata_ = nullptr;

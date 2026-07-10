@@ -20,7 +20,9 @@ set(SHADER_OUT_DIR "${ENGINE_BINARIES_ROOT}/$<CONFIG>/Shaders")
 
 set(SHADER_SOURCES
     Triangle.vert.glsl
-    Triangle.frag.glsl)
+    Triangle.frag.glsl
+    Composite.vert.glsl
+    Composite.frag.glsl)
 
 set(SHADER_BINARIES "")
 foreach(SHADER_SRC IN LISTS SHADER_SOURCES)
