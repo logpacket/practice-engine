@@ -140,7 +140,12 @@ bool FRenderer::Init(IRHIDevice& device, IWindow& window) {
 void FRenderer::RenderFrame() {
     if (!initialized_) { return; }
 
-    const uint32 image_index = device_->AcquireNextSwapchainImage(swapchain_);
+    const RHIAcquiredImage acquired = device_->AcquireNextSwapchainImage(swapchain_);
+    if (acquired.needs_recreate) {
+        // Out-of-date swapchain; recreation lands in §6.f. Skip the frame.
+        return;
+    }
+    const uint32 image_index = acquired.image_index;
 
     RHICommandListHandle cmd_h = device_->AcquireCommandList();
     IRHICommandList*     cmd   = device_->Lock(cmd_h);
@@ -186,7 +191,17 @@ void FRenderer::RenderFrame() {
     cmd->TransitionToPresent(swapchain_, image_index);
     cmd->End();
 
-    device_->Submit(cmd_h);
+    // Boundary submit (ADR-0027): the present owner supplies the swapchain's
+    // binary semaphores and the frame's timeline value.
+    const RHISemaphore render_finished =
+        device_->GetRenderFinishedSemaphore(swapchain_, image_index);
+
+    RHISubmitInfo submit{};
+    submit.wait                  = {&acquired.image_available, 1};
+    submit.signal                = {&render_finished, 1};
+    submit.timeline_signal_value = ++frame_number_;
+
+    device_->Submit(cmd_h, submit);
     device_->Present(swapchain_, image_index);
 }
 

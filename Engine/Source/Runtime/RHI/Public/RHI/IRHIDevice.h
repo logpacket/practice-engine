@@ -24,23 +24,36 @@ public:
     virtual RHISwapchainHandle CreateSwapchain(const RHISwapchainDesc& desc) = 0;
 
     // --- Resource destruction ---------------------------------------------
-    // Stage 1: caller must ensure no GPU work in flight references the handle
-    // (typically by calling WaitIdle() before destroying anything). Stage 2
-    // adds a deferred-delete queue.
+    // Deferred-delete (ADR-0021): Destroy enqueues the backend payload stamped
+    // with the current frame value; it is reclaimed once the frame timeline
+    // passes that value. No WaitIdle-before-destroy precondition remains.
+    // Exception: Destroy(RHISwapchainHandle) is immediate and stalls the
+    // device internally - swapchain teardown is a shutdown/recreate path, not
+    // a steady-loop operation.
     virtual void Destroy(RHIBufferHandle handle)    = 0;
     virtual void Destroy(RHIShaderHandle handle)    = 0;
     virtual void Destroy(RHIPipelineHandle handle)  = 0;
     virtual void Destroy(RHISwapchainHandle handle) = 0;
 
     // --- Command lists -----------------------------------------------------
+    // AcquireCommandList returns a command list from the current frame slot's
+    // ring; the handle is recycled MAX_FRAMES_IN_FLIGHT frames later and must
+    // not be held across frames.
     virtual RHICommandListHandle AcquireCommandList() = 0;
     virtual IRHICommandList*     Lock(RHICommandListHandle handle) = 0;
-    virtual EngineResult         Submit(RHICommandListHandle handle) = 0;
+    // Submit with the explicit sync contract (ADR-0027). See RHISubmitInfo.
+    virtual EngineResult         Submit(RHICommandListHandle handle,
+                                        const RHISubmitInfo& sync) = 0;
 
     // --- Swapchain frame loop ---------------------------------------------
-    // Returns the next swapchain image index to render into. Blocks until an
-    // image is available. Stage 1 has no MAX_FRAMES_IN_FLIGHT > 1.
-    virtual uint32       AcquireNextSwapchainImage(RHISwapchainHandle swapchain) = 0;
+    // Marks the start of a frame: waits until the frame timeline permits
+    // reusing the next frame slot (ADR-0020), reclaims deferred deletes, then
+    // acquires the next swapchain image. The returned image_available must be
+    // passed as a wait semaphore on this frame's boundary submit.
+    virtual RHIAcquiredImage AcquireNextSwapchainImage(RHISwapchainHandle swapchain) = 0;
+    // The binary semaphore the boundary submit must signal and Present waits on.
+    virtual RHISemaphore GetRenderFinishedSemaphore(RHISwapchainHandle swapchain,
+                                                    uint32 image_index) = 0;
     virtual EngineResult Present(RHISwapchainHandle swapchain, uint32 image_index) = 0;
 
     // --- Sync --------------------------------------------------------------

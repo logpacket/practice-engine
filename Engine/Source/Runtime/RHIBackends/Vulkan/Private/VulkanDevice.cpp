@@ -84,6 +84,15 @@ VkFormat ToVkFormat(ERHIFormat f) {
 // MAILBOX/Immediate arrive with the Stage 2 swapchain rework.
 // Shader stage conversion is inlined in CreateGraphicsPipeline (two stages only).
 
+// RHISemaphore <-> VkSemaphore. VkSemaphore is a 64-bit non-dispatchable
+// handle; the opaque field carries it across the ABI unchanged.
+RHISemaphore WrapSemaphore(VkSemaphore s) noexcept {
+    return RHISemaphore{reinterpret_cast<uint64_t>(s)};
+}
+VkSemaphore UnwrapSemaphore(RHISemaphore s) noexcept {
+    return reinterpret_cast<VkSemaphore>(s.opaque);
+}
+
 }  // namespace
 
 // ----- Lifecycle -----
@@ -94,11 +103,11 @@ FVulkanDevice::FVulkanDevice(const RHIDeviceCreateDesc& desc, bool& out_failed) 
     create_surface_          = desc.create_surface;
     create_surface_userdata_ = desc.create_surface_userdata;
 
-    if (!CreateInstance(desc))    { return; }
-    if (!CreateDebugMessenger())  { return; }
-    if (!SelectPhysicalDevice())  { return; }
-    if (!CreateLogicalDevice())   { return; }
-    if (!CreateCommandPool())     { return; }
+    if (!CreateInstance(desc))     { return; }
+    if (!CreateDebugMessenger())   { return; }
+    if (!SelectPhysicalDevice())   { return; }
+    if (!CreateLogicalDevice())    { return; }
+    if (!CreateFrameResources())   { return; }
 
     out_failed = false;
     ENGINE_LOG_INFO(LogVulkanRHI, "FVulkanDevice ready (queue family {})", graphics_queue_family_);
@@ -107,16 +116,25 @@ FVulkanDevice::FVulkanDevice(const RHIDeviceCreateDesc& desc, bool& out_failed) 
 FVulkanDevice::~FVulkanDevice() {
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
-        // Drain pools (most resources should already have been Destroy()-ed by caller).
+        // Reclaim everything still pending, then drain pools (most resources
+        // should already have been Destroy()-ed by the caller).
+        DrainDeferred(UINT64_MAX);
         command_lists_.ForEachLive([this](VulkanCommandListPayload& p) { DestroyCommandListPayload(p); });
         swapchains_.ForEachLive   ([this](VulkanSwapchainPayload& p)   { DestroySwapchainPayload(p); });
         pipelines_.ForEachLive    ([this](VulkanPipelinePayload& p)    { DestroyPipelinePayload(p); });
         shaders_.ForEachLive      ([this](VulkanShaderPayload& p)      { DestroyShaderPayload(p); });
         buffers_.ForEachLive      ([this](VulkanBufferPayload& p)      { DestroyBufferPayload(p); });
 
-        if (command_pool_ != VK_NULL_HANDLE) {
-            vkDestroyCommandPool(device_, command_pool_, nullptr);
-            command_pool_ = VK_NULL_HANDLE;
+        for (FFrameSlot& slot : frames_) {
+            if (slot.pool != VK_NULL_HANDLE) {
+                vkDestroyCommandPool(device_, slot.pool, nullptr);
+                slot.pool = VK_NULL_HANDLE;
+            }
+            slot.lists.clear();
+        }
+        if (frame_timeline_ != VK_NULL_HANDLE) {
+            vkDestroySemaphore(device_, frame_timeline_, nullptr);
+            frame_timeline_ = VK_NULL_HANDLE;
         }
         vkDestroyDevice(device_, nullptr);
         device_ = VK_NULL_HANDLE;
@@ -222,15 +240,20 @@ bool FVulkanDevice::SelectPhysicalDevice() {
             continue;
         }
 
+        VkPhysicalDeviceVulkan12Features feat12{};
+        feat12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
         VkPhysicalDeviceVulkan13Features feat13{};
         feat13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+        feat13.pNext = &feat12;
         VkPhysicalDeviceFeatures2 feat2{};
         feat2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
         feat2.pNext = &feat13;
         vkGetPhysicalDeviceFeatures2(candidate, &feat2);
-        if (feat13.dynamicRendering == VK_FALSE || feat13.synchronization2 == VK_FALSE) {
-            ENGINE_LOG_INFO(LogVulkanRHI, "Skipping '{}' - dynamicRendering/synchronization2 unsupported",
-                            props.deviceName);
+        if (feat13.dynamicRendering == VK_FALSE || feat13.synchronization2 == VK_FALSE ||
+            feat12.timelineSemaphore == VK_FALSE) {
+            ENGINE_LOG_INFO(LogVulkanRHI,
+                "Skipping '{}' - dynamicRendering/synchronization2/timelineSemaphore unsupported",
+                props.deviceName);
             continue;
         }
 
@@ -275,8 +298,13 @@ bool FVulkanDevice::CreateLogicalDevice() {
     qci.queueCount       = 1;
     qci.pQueuePriorities = &priority;
 
+    VkPhysicalDeviceVulkan12Features feat12{};
+    feat12.sType             = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    feat12.timelineSemaphore = VK_TRUE;  // ADR-0020 (core in the 1.3 baseline)
+
     VkPhysicalDeviceVulkan13Features feat13{};
     feat13.sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    feat13.pNext            = &feat12;
     feat13.dynamicRendering = VK_TRUE;
     feat13.synchronization2 = VK_TRUE;
 
@@ -306,15 +334,38 @@ bool FVulkanDevice::CreateLogicalDevice() {
     return true;
 }
 
-bool FVulkanDevice::CreateCommandPool() {
+bool FVulkanDevice::CreateFrameResources() {
+    // One command pool per frame slot (ADR-0020): the pool is bulk-reset at
+    // frame start after the timeline wait proves the slot's frame completed.
+    // RESET_COMMAND_BUFFER_BIT stays so Begin() may also reset individually
+    // (headless callers never advance the frame ring).
     VkCommandPoolCreateInfo info{};
     info.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     info.queueFamilyIndex = graphics_queue_family_;
     info.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
 
-    const VkResult r = vkCreateCommandPool(device_, &info, nullptr, &command_pool_);
+    for (FFrameSlot& slot : frames_) {
+        const VkResult r = vkCreateCommandPool(device_, &info, nullptr, &slot.pool);
+        if (r != VK_SUCCESS) {
+            ENGINE_LOG_ERROR(LogVulkanRHI, "vkCreateCommandPool failed: VkResult {}",
+                             static_cast<int>(r));
+            return false;
+        }
+    }
+
+    VkSemaphoreTypeCreateInfo type_ci{};
+    type_ci.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    type_ci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    type_ci.initialValue  = 0;
+
+    VkSemaphoreCreateInfo sem_ci{};
+    sem_ci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    sem_ci.pNext = &type_ci;
+
+    const VkResult r = vkCreateSemaphore(device_, &sem_ci, nullptr, &frame_timeline_);
     if (r != VK_SUCCESS) {
-        ENGINE_LOG_ERROR(LogVulkanRHI, "vkCreateCommandPool failed: VkResult {}", static_cast<int>(r));
+        ENGINE_LOG_ERROR(LogVulkanRHI, "vkCreateSemaphore (timeline) failed: VkResult {}",
+                         static_cast<int>(r));
         return false;
     }
     return true;
@@ -617,23 +668,22 @@ RHISwapchainHandle FVulkanDevice::CreateSwapchain(const RHISwapchainDesc& desc) 
         PE_VK_CHECK(vkCreateImageView(device_, &ivci, nullptr, &payload.image_views[i]));
     }
 
-    // 5. Sync objects. Stage 1 has 1 frame in flight.
-    //   - image_available: 1 instance (consumed by submit before reuse, guarded by frame_done fence)
-    //   - render_finished_per_image: N instances, indexed by acquired image to avoid
-    //     racing with the presentation engine's hold of a previous image's semaphore.
+    // 5. Sync objects (ADR-0020): binary semaphores survive only at the
+    //    swapchain boundary - image_available per frame slot (the timeline
+    //    wait at frame start guarantees the slot's previous acquire semaphore
+    //    was consumed), render_finished per image (the presentation engine may
+    //    still hold the previous signal of the prior image).
     VkSemaphoreCreateInfo sem_ci{};
     sem_ci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    PE_VK_CHECK(vkCreateSemaphore(device_, &sem_ci, nullptr, &payload.image_available));
 
+    payload.image_available_per_slot.resize(kMaxFramesInFlight, VK_NULL_HANDLE);
+    for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
+        PE_VK_CHECK(vkCreateSemaphore(device_, &sem_ci, nullptr, &payload.image_available_per_slot[i]));
+    }
     payload.render_finished_per_image.resize(got_count, VK_NULL_HANDLE);
     for (uint32_t i = 0; i < got_count; ++i) {
         PE_VK_CHECK(vkCreateSemaphore(device_, &sem_ci, nullptr, &payload.render_finished_per_image[i]));
     }
-
-    VkFenceCreateInfo fci{};
-    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;  // first AcquireNextSwapchainImage waits then resets
-    PE_VK_CHECK(vkCreateFence(device_, &fci, nullptr, &payload.frame_done));
 
     ENGINE_LOG_INFO(LogVulkanRHI, "Swapchain created: {}x{}, {} images, format={}",
                     desc.width, desc.height, got_count, static_cast<int>(chosen.format));
@@ -657,16 +707,14 @@ void FVulkanDevice::DestroyPipelinePayload(VulkanPipelinePayload& p) {
 }
 
 void FVulkanDevice::DestroySwapchainPayload(VulkanSwapchainPayload& p) {
-    if (p.frame_done != VK_NULL_HANDLE) {
-        vkDestroyFence(device_, p.frame_done, nullptr); p.frame_done = VK_NULL_HANDLE;
-    }
     for (VkSemaphore s : p.render_finished_per_image) {
         if (s != VK_NULL_HANDLE) { vkDestroySemaphore(device_, s, nullptr); }
     }
     p.render_finished_per_image.clear();
-    if (p.image_available != VK_NULL_HANDLE) {
-        vkDestroySemaphore(device_, p.image_available, nullptr); p.image_available = VK_NULL_HANDLE;
+    for (VkSemaphore s : p.image_available_per_slot) {
+        if (s != VK_NULL_HANDLE) { vkDestroySemaphore(device_, s, nullptr); }
     }
+    p.image_available_per_slot.clear();
     for (VkImageView v : p.image_views) { if (v != VK_NULL_HANDLE) { vkDestroyImageView(device_, v, nullptr); } }
     p.image_views.clear();
     p.images.clear();
@@ -675,79 +723,209 @@ void FVulkanDevice::DestroySwapchainPayload(VulkanSwapchainPayload& p) {
 }
 
 void FVulkanDevice::DestroyCommandListPayload(VulkanCommandListPayload& p) {
-    if (p.cmd != VK_NULL_HANDLE && command_pool_ != VK_NULL_HANDLE) {
-        vkFreeCommandBuffers(device_, command_pool_, 1, &p.cmd);
-        p.cmd = VK_NULL_HANDLE;
-    }
+    // The VkCommandBuffer is owned by its frame slot's pool and freed with it.
+    p.cmd = VK_NULL_HANDLE;
     if (p.wrapper != nullptr) {
         delete p.wrapper;
         p.wrapper = nullptr;
     }
 }
 
-void FVulkanDevice::Destroy(RHIBufferHandle h)    { auto p = buffers_.Remove(h);    DestroyBufferPayload(p); }
-void FVulkanDevice::Destroy(RHIShaderHandle h)    { auto p = shaders_.Remove(h);    DestroyShaderPayload(p); }
-void FVulkanDevice::Destroy(RHIPipelineHandle h)  { auto p = pipelines_.Remove(h);  DestroyPipelinePayload(p); }
-void FVulkanDevice::Destroy(RHISwapchainHandle h) { auto p = swapchains_.Remove(h); DestroySwapchainPayload(p); }
+// Deferred-delete (ADR-0021): the payload is reclaimed once the frame timeline
+// passes the frame value current at Destroy time.
+void FVulkanDevice::Destroy(RHIBufferHandle h) {
+    deferred_buffers_.push_back({CurrentFrameValue(), buffers_.Remove(h)});
+}
+void FVulkanDevice::Destroy(RHIShaderHandle h) {
+    deferred_shaders_.push_back({CurrentFrameValue(), shaders_.Remove(h)});
+}
+void FVulkanDevice::Destroy(RHIPipelineHandle h) {
+    deferred_pipelines_.push_back({CurrentFrameValue(), pipelines_.Remove(h)});
+}
+void FVulkanDevice::Destroy(RHISwapchainHandle h) {
+    // Swapchain teardown is a shutdown/recreate path, never steady-loop:
+    // stall so the presentation engine and in-flight frames release the images.
+    vkDeviceWaitIdle(device_);
+    auto p = swapchains_.Remove(h);
+    DestroySwapchainPayload(p);
+}
+
+void FVulkanDevice::DrainDeferred(uint64_t completed) {
+    const auto drain = [completed](auto& queue, auto&& destroy_fn) {
+        auto it = queue.begin();
+        while (it != queue.end()) {
+            if (it->stamp <= completed) {
+                destroy_fn(it->payload);
+                it = queue.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    };
+    drain(deferred_buffers_,   [this](VulkanBufferPayload& p)   { DestroyBufferPayload(p); });
+    drain(deferred_shaders_,   [this](VulkanShaderPayload& p)   { DestroyShaderPayload(p); });
+    drain(deferred_pipelines_, [this](VulkanPipelinePayload& p) { DestroyPipelinePayload(p); });
+}
 
 // ----- Command lists -----
 
 RHICommandListHandle FVulkanDevice::AcquireCommandList() {
+    FFrameSlot& slot = frames_[current_slot_];
+
+    // Recycle a wrapper recorded MAX_FRAMES_IN_FLIGHT frames ago; the pool
+    // reset at frame start returned its buffer to the initial state.
+    if (slot.used < slot.lists.size()) {
+        return slot.lists[slot.used++];
+    }
+
     VkCommandBufferAllocateInfo ai{};
     ai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    ai.commandPool        = command_pool_;
+    ai.commandPool        = slot.pool;
     ai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     ai.commandBufferCount = 1;
 
     VulkanCommandListPayload payload;
     PE_VK_CHECK(vkAllocateCommandBuffers(device_, &ai, &payload.cmd));
     payload.wrapper = new FVulkanCommandList(*this, payload.cmd);
-    return command_lists_.Insert(std::move(payload));
+
+    const RHICommandListHandle handle = command_lists_.Insert(std::move(payload));
+    slot.lists.push_back(handle);
+    slot.used++;
+    return handle;
 }
 
 IRHICommandList* FVulkanDevice::Lock(RHICommandListHandle h) {
     return command_lists_.Get(h)->wrapper;
 }
 
-EngineResult FVulkanDevice::Submit(RHICommandListHandle h) {
+EngineResult FVulkanDevice::Submit(RHICommandListHandle h, const RHISubmitInfo& sync) {
     auto* cl = command_lists_.Get(h);
-    const RHISwapchainHandle sc_handle  = cl->wrapper->BoundSwapchain();
-    const uint32_t           image_idx  = cl->wrapper->BoundImageIndex();
-    if (!sc_handle.valid()) {
-        ENGINE_LOG_ERROR(LogVulkanRHI,
-            "Submit: command list has no bound swapchain (call TransitionToRenderTarget first)");
-        return EngineResult::Fail(-1);
+
+    // sync2 submit: binary waits/signals from the caller (boundary submit
+    // only), plus the frame timeline when timeline_signal_value > 0.
+    std::vector<VkSemaphoreSubmitInfo> waits;
+    waits.reserve(sync.wait.size);
+    for (uint64_t i = 0; i < sync.wait.size; ++i) {
+        VkSemaphoreSubmitInfo wi{};
+        wi.sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        wi.semaphore = UnwrapSemaphore(sync.wait.data[i]);
+        wi.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        waits.push_back(wi);
     }
-    auto* sc_payload = swapchains_.Get(sc_handle);
-    ENGINE_CHECK(image_idx < sc_payload->render_finished_per_image.size());
 
-    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    VkSubmitInfo si{};
-    si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    si.waitSemaphoreCount   = 1;
-    si.pWaitSemaphores      = &sc_payload->image_available;
-    si.pWaitDstStageMask    = &wait_stage;
-    si.commandBufferCount   = 1;
-    si.pCommandBuffers      = &cl->cmd;
-    si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores    = &sc_payload->render_finished_per_image[image_idx];
+    std::vector<VkSemaphoreSubmitInfo> signals;
+    signals.reserve(sync.signal.size + 1);
+    for (uint64_t i = 0; i < sync.signal.size; ++i) {
+        VkSemaphoreSubmitInfo si{};
+        si.sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        si.semaphore = UnwrapSemaphore(sync.signal.data[i]);
+        si.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        signals.push_back(si);
+    }
+    if (sync.timeline_signal_value > 0) {
+        VkSemaphoreSubmitInfo ti{};
+        ti.sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        ti.semaphore = frame_timeline_;
+        ti.value     = sync.timeline_signal_value;
+        ti.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        signals.push_back(ti);
+    }
 
-    PE_VK_CHECK(vkQueueSubmit(graphics_queue_, 1, &si, sc_payload->frame_done));
+    VkCommandBufferSubmitInfo cbi{};
+    cbi.sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    cbi.commandBuffer = cl->cmd;
+
+    VkSubmitInfo2 si2{};
+    si2.sType                    = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    si2.waitSemaphoreInfoCount   = static_cast<uint32_t>(waits.size());
+    si2.pWaitSemaphoreInfos      = waits.data();
+    si2.commandBufferInfoCount   = 1;
+    si2.pCommandBufferInfos      = &cbi;
+    si2.signalSemaphoreInfoCount = static_cast<uint32_t>(signals.size());
+    si2.pSignalSemaphoreInfos    = signals.data();
+
+    PE_VK_CHECK(vkQueueSubmit2(graphics_queue_, 1, &si2, VK_NULL_HANDLE));
+
+    if (sync.timeline_signal_value > 0) {
+        submitted_timeline_value_ = std::max(submitted_timeline_value_, sync.timeline_signal_value);
+
+        // G8 instrument: frames submitted but not yet signaled on the timeline.
+        uint64_t completed = 0;
+        vkGetSemaphoreCounterValue(device_, frame_timeline_, &completed);
+        const uint64_t outstanding =
+            sync.timeline_signal_value > completed ? sync.timeline_signal_value - completed : 0;
+        if (outstanding > peak_frames_in_flight_) {
+            peak_frames_in_flight_ = outstanding;
+            ENGINE_LOG_INFO(LogVulkanRHI, "[frames_in_flight] peak={}", peak_frames_in_flight_);
+        }
+    }
     return EngineResult::Ok();
 }
 
-uint32_t FVulkanDevice::AcquireNextSwapchainImage(RHISwapchainHandle h) {
+// ----- Swapchain frame loop -----
+
+RHIAcquiredImage FVulkanDevice::AcquireNextSwapchainImage(RHISwapchainHandle h) {
     auto* p = swapchains_.Get(h);
-    // Stage 1 single frame-in-flight: wait for the previous frame's submit to complete
-    // before reusing the sync objects.
-    vkWaitForFences(device_, 1, &p->frame_done, VK_TRUE, UINT64_MAX);
-    vkResetFences(device_, 1, &p->frame_done);
+
+    // Frame pacing (ADR-0020): the frame about to record will signal
+    // V = submitted+1 and reuses the slot last used by frame V - MFIF. Wait
+    // until the timeline reaches that value - never vkDeviceWaitIdle.
+    const uint64_t next_value = CurrentFrameValue();
+    if (next_value > kMaxFramesInFlight) {
+        const uint64_t wait_value = next_value - kMaxFramesInFlight;
+        VkSemaphoreWaitInfo wi{};
+        wi.sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+        wi.semaphoreCount = 1;
+        wi.pSemaphores    = &frame_timeline_;
+        wi.pValues        = &wait_value;
+        PE_VK_CHECK(vkWaitSemaphores(device_, &wi, UINT64_MAX));
+    }
+
+    // Reclaim deferred deletes the GPU has provably passed.
+    uint64_t completed = 0;
+    vkGetSemaphoreCounterValue(device_, frame_timeline_, &completed);
+    DrainDeferred(completed);
+
+    // G8 instrument: frames in flight = the frame the CPU is now starting
+    // (value V) minus what the GPU has signaled. V - completed == 2 means the
+    // CPU records frame V while frame V-1 still runs on the GPU.
+    const uint64_t in_flight = next_value > completed ? next_value - completed : 0;
+    if (in_flight > peak_frames_in_flight_) {
+        peak_frames_in_flight_ = in_flight;
+        ENGINE_LOG_INFO(LogVulkanRHI, "[frames_in_flight] peak={}", peak_frames_in_flight_);
+    }
+
+    // Enter the frame slot: bulk-reset its command pool for re-recording.
+    current_slot_ = static_cast<uint32_t>(next_value % kMaxFramesInFlight);
+    FFrameSlot& slot = frames_[current_slot_];
+    PE_VK_CHECK(vkResetCommandPool(device_, slot.pool, 0));
+    slot.used = 0;
+
+    RHIAcquiredImage out{};
+    VkSemaphore image_available = p->image_available_per_slot[current_slot_];
 
     uint32_t image_index = 0;
-    PE_VK_CHECK(vkAcquireNextImageKHR(device_, p->swapchain, UINT64_MAX,
-                                      p->image_available, VK_NULL_HANDLE, &image_index));
-    p->current_image_index = image_index;
-    return image_index;
+    const VkResult r = vkAcquireNextImageKHR(device_, p->swapchain, UINT64_MAX,
+                                             image_available, VK_NULL_HANDLE, &image_index);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+        out.needs_recreate = true;
+        return out;
+    }
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
+        ENGINE_LOG_ERROR(LogVulkanRHI, "vkAcquireNextImageKHR failed: VkResult {}",
+                         static_cast<int>(r));
+        ENGINE_FATAL("Swapchain acquire failed; see log for details");
+    }
+
+    out.image_index     = image_index;
+    out.image_available = WrapSemaphore(image_available);
+    return out;
+}
+
+RHISemaphore FVulkanDevice::GetRenderFinishedSemaphore(RHISwapchainHandle h, uint32_t image_index) {
+    auto* p = swapchains_.Get(h);
+    ENGINE_CHECK(image_index < p->render_finished_per_image.size());
+    return WrapSemaphore(p->render_finished_per_image[image_index]);
 }
 
 EngineResult FVulkanDevice::Present(RHISwapchainHandle h, uint32_t image_index) {
@@ -762,6 +940,10 @@ EngineResult FVulkanDevice::Present(RHISwapchainHandle h, uint32_t image_index) 
     pi.pImageIndices      = &image_index;
 
     const VkResult r = vkQueuePresentKHR(graphics_queue_, &pi);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+        // Caller reacts by recreating (§6.f); not a fatal error.
+        return EngineResult::Fail(static_cast<int32_t>(r));
+    }
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
         ENGINE_LOG_ERROR(LogVulkanRHI, "vkQueuePresentKHR failed: VkResult {}", static_cast<int>(r));
         return EngineResult::Fail(static_cast<int32_t>(r));
@@ -772,6 +954,8 @@ EngineResult FVulkanDevice::Present(RHISwapchainHandle h, uint32_t image_index) 
 EngineResult FVulkanDevice::WaitIdle() {
     if (device_ == VK_NULL_HANDLE) { return EngineResult::Fail(-1); }
     vkDeviceWaitIdle(device_);
+    // Idle means every submitted frame completed: reclaim everything pending.
+    DrainDeferred(UINT64_MAX);
     return EngineResult::Ok();
 }
 

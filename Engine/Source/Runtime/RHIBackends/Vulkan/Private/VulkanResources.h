@@ -32,16 +32,15 @@ struct VulkanSwapchainPayload {
     std::vector<VkImage>      images;        // borrowed from swapchain (do not destroy)
     std::vector<VkImageView>  image_views;   // owned by us
 
-    // Stage 1: 1 frame-in-flight. image_available is per-acquire (1 instance is fine
-    // since the previous submit's wait has consumed it by the time the fence signals).
-    // render_finished is PER-IMAGE because the presentation engine may still hold the
-    // previous signal of the prior image when we want to signal the next image
-    // (validation: VUID-vkQueueSubmit-pSignalSemaphores-00067).
-    VkSemaphore               image_available = VK_NULL_HANDLE;
+    // Stage 2 (ADR-0020): frame pacing is the device timeline semaphore; only
+    // the swapchain handshake keeps binary semaphores.
+    //   - image_available is PER-FRAME-SLOT: the timeline wait at frame start
+    //     guarantees the slot's previous acquire semaphore was consumed.
+    //   - render_finished is PER-IMAGE because the presentation engine may
+    //     still hold the previous signal of the prior image when we want to
+    //     signal the next one (VUID-vkQueueSubmit-pSignalSemaphores-00067).
+    std::vector<VkSemaphore>  image_available_per_slot;
     std::vector<VkSemaphore>  render_finished_per_image;
-    VkFence                   frame_done      = VK_NULL_HANDLE;
-
-    uint32_t                  current_image_index = 0;
 };
 
 struct VulkanCommandListPayload {

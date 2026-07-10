@@ -46,6 +46,10 @@ private:
 
     uint32             swapchain_width_  = 0;
     uint32             swapchain_height_ = 0;
+
+    // Monotonic frame counter; signaled on the frame timeline by each frame's
+    // boundary submit (ADR-0020/0027).
+    uint64             frame_number_ = 0;
 };
 
 }  // namespace pe

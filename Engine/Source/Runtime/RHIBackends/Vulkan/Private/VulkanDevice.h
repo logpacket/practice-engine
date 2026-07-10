@@ -36,9 +36,11 @@ public:
 
     RHICommandListHandle AcquireCommandList() override;
     IRHICommandList*     Lock(RHICommandListHandle handle) override;
-    EngineResult         Submit(RHICommandListHandle handle) override;
+    EngineResult         Submit(RHICommandListHandle handle, const RHISubmitInfo& sync) override;
 
-    uint32_t     AcquireNextSwapchainImage(RHISwapchainHandle swapchain) override;
+    RHIAcquiredImage AcquireNextSwapchainImage(RHISwapchainHandle swapchain) override;
+    RHISemaphore     GetRenderFinishedSemaphore(RHISwapchainHandle swapchain,
+                                                uint32_t image_index) override;
     EngineResult Present(RHISwapchainHandle swapchain, uint32_t image_index) override;
     EngineResult WaitIdle() override;
 
@@ -53,12 +55,14 @@ public:
     VkQueue          GraphicsQueue()         const noexcept { return graphics_queue_; }
     uint32_t         GraphicsQueueFamily()   const noexcept { return graphics_queue_family_; }
 
+    static constexpr uint32_t kMaxFramesInFlight = 2;
+
 private:
     bool CreateInstance(const RHIDeviceCreateDesc& desc);
     bool CreateDebugMessenger();
     bool SelectPhysicalDevice();
     bool CreateLogicalDevice();
-    bool CreateCommandPool();
+    bool CreateFrameResources();  // per-frame command pools + frame timeline
 
     // Returns UINT32_MAX if no matching memory type. memory_properties is a
     // mask of VkMemoryPropertyFlagBits (HOST_VISIBLE|HOST_COHERENT etc.).
@@ -70,6 +74,12 @@ private:
     void DestroySwapchainPayload(VulkanSwapchainPayload& p);
     void DestroyCommandListPayload(VulkanCommandListPayload& p);
 
+    // The frame value the current recording frame's boundary submit will
+    // signal (ADR-0021). Deferred deletes are stamped with this.
+    uint64_t CurrentFrameValue() const noexcept { return submitted_timeline_value_ + 1; }
+    // Destroys every deferred payload whose stamp is <= completed.
+    void     DrainDeferred(uint64_t completed);
+
     bool                     validation_enabled_   = false;
     VkInstance               instance_             = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debug_messenger_      = VK_NULL_HANDLE;
@@ -78,7 +88,30 @@ private:
     VkQueue                  graphics_queue_       = VK_NULL_HANDLE;
     uint32_t                 graphics_queue_family_ = UINT32_MAX;
 
-    VkCommandPool            command_pool_         = VK_NULL_HANDLE;
+    // --- Multi-frame state (ADR-0020) ---
+    // One command pool per frame slot; the pool is bulk-reset at frame start
+    // once the timeline wait proves the slot's previous frame completed.
+    struct FFrameSlot {
+        VkCommandPool                     pool = VK_NULL_HANDLE;
+        std::vector<RHICommandListHandle> lists;  // recycled wrappers
+        uint32_t                          used = 0;
+    };
+    FFrameSlot  frames_[kMaxFramesInFlight];
+    uint32_t    current_slot_ = 0;
+
+    VkSemaphore frame_timeline_            = VK_NULL_HANDLE;
+    uint64_t    submitted_timeline_value_  = 0;  // highest value passed to Submit
+    uint64_t    peak_frames_in_flight_     = 0;  // G8 instrument
+
+    // --- Deferred-delete queues (ADR-0021) ---
+    template <typename TPayload>
+    struct FDeferred {
+        uint64_t stamp;
+        TPayload payload;
+    };
+    std::vector<FDeferred<VulkanBufferPayload>>   deferred_buffers_;
+    std::vector<FDeferred<VulkanShaderPayload>>   deferred_shaders_;
+    std::vector<FDeferred<VulkanPipelinePayload>> deferred_pipelines_;
 
     PFN_RHICreateSurface     create_surface_       = nullptr;
     void*                    create_surface_userdata_ = nullptr;

@@ -39,6 +39,40 @@ using RHIPipelineHandle    = RHIHandle<PipelineTag>;
 using RHISwapchainHandle   = RHIHandle<SwapchainTag>;
 using RHICommandListHandle = RHIHandle<CommandListTag>;
 
+// --- Submit synchronization (ADR-0020 / ADR-0027) ----------------------------
+
+// Opaque reference to a backend binary semaphore (VkSemaphore on Vulkan).
+// Callers never create these; they are obtained from the swapchain accessors
+// (AcquireNextSwapchainImage / GetRenderFinishedSemaphore) and passed back
+// through RHISubmitInfo on the boundary submit only.
+struct RHISemaphore {
+    uint64 opaque = 0;
+    constexpr bool valid() const noexcept { return opaque != 0; }
+};
+
+// Explicit submit sync contract (ADR-0027). Interior (non-swapchain) submits
+// pass empty wait/signal spans. The one boundary submit per frame that writes
+// the swapchain waits image_available and signals render_finished, both
+// supplied by the present owner (the Renderer).
+//
+// timeline_signal_value > 0 makes this submit signal the device frame timeline
+// (ADR-0020). Exactly one submit per frame must signal, with a value that
+// increases by 1 each frame - frame pacing and deferred-delete key off it.
+struct RHISubmitInfo {
+    EngineSpan<const RHISemaphore> wait                  = {nullptr, 0};
+    EngineSpan<const RHISemaphore> signal                = {nullptr, 0};
+    uint64                         timeline_signal_value = 0;
+};
+
+// Result of AcquireNextSwapchainImage. When needs_recreate is true the
+// swapchain is out of date: no image was acquired, image_available is invalid,
+// and the caller must RecreateSwapchain before rendering (§6.f).
+struct RHIAcquiredImage {
+    uint32       image_index    = 0;
+    RHISemaphore image_available;
+    bool         needs_recreate = false;
+};
+
 // --- Enums ------------------------------------------------------------------
 enum class ERHIFormat : uint16 {
     Unknown = 0,
