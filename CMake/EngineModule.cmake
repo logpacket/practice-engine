@@ -149,6 +149,13 @@ function(add_engine_executable)
     set_target_properties(${ARG_NAME} PROPERTIES
         POSITION_INDEPENDENT_CODE ON)
 
+    # Same build-type macros as add_engine_module - executables (tests) that
+    # instantiate engine templates rely on ENGINE_CHECK being active in Debug.
+    target_compile_definitions(${ARG_NAME} PRIVATE
+        $<$<CONFIG:Debug>:ENGINE_BUILD_DEBUG=1>
+        $<$<CONFIG:Release>:ENGINE_BUILD_RELEASE=1>
+        $<$<CONFIG:RelWithDebInfo>:ENGINE_BUILD_RELEASE=1>)
+
     # Linux: resolve .so from the executable directory via RPATH=$ORIGIN
     if(UNIX AND NOT APPLE)
         set_target_properties(${ARG_NAME} PROPERTIES

@@ -15,12 +15,14 @@
 namespace pe {
 
 // --- Handles ----------------------------------------------------------------
-// Stage 1: simple monotonically-issued index. No generation counter; Debug
-// builds use a slot state enum inside VulkanRHI for use-after-destroy detection
-// (Architecture.md §3.2). Stage 2 introduces generation + deferred-delete.
+// Stage 2 (ADR-0021): 64-bit handle {index, generation}. The backend pool
+// issues a per-slot generation; Get/Remove on a stale (destroyed) handle is a
+// generation mismatch and a Debug FATAL, not a silent alias. Index 0 stays the
+// invalid sentinel (a zero-initialized handle is never valid).
 template <class Tag>
 struct RHIHandle {
     uint32 index;
+    uint32 generation;
     constexpr bool valid() const noexcept { return index != 0; }
     constexpr bool operator==(const RHIHandle&) const noexcept = default;
 };

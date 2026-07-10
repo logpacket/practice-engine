@@ -38,7 +38,7 @@ private:
     VkCommandBuffer     cmd_;
     // Set in TransitionToRenderTarget; consumed by Submit/Present so the device
     // knows which swapchain's sync objects to use.
-    RHISwapchainHandle  bound_swapchain_   = {0};
+    RHISwapchainHandle  bound_swapchain_   = {};
     uint32_t            bound_image_index_ = 0;
 };
 

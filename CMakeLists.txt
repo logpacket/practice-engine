@@ -95,6 +95,7 @@ if(ENGINE_BUILD_TESTS)
     add_subdirectory(Engine/Source/Runtime/Tests/DummyModule)
     add_subdirectory(Engine/Source/Runtime/Tests/dummy_module_smoke)
     add_subdirectory(Engine/Source/Runtime/Tests/rhi_smoke)
+    add_subdirectory(Engine/Source/Runtime/Tests/rhi_pool_smoke)   # Stage 2 §6.a
     add_subdirectory(Engine/Source/Runtime/Tests/app_smoke)
 endif()
 

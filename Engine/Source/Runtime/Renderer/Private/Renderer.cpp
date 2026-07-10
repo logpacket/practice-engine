@@ -195,11 +195,11 @@ void FRenderer::Shutdown() {
 
     device_->WaitIdle();
 
-    if (vertex_buffer_.valid())   { device_->Destroy(vertex_buffer_);   vertex_buffer_   = {0}; }
-    if (pipeline_.valid())        { device_->Destroy(pipeline_);        pipeline_        = {0}; }
-    if (fragment_shader_.valid()) { device_->Destroy(fragment_shader_); fragment_shader_ = {0}; }
-    if (vertex_shader_.valid())   { device_->Destroy(vertex_shader_);   vertex_shader_   = {0}; }
-    if (swapchain_.valid())       { device_->Destroy(swapchain_);       swapchain_       = {0}; }
+    if (vertex_buffer_.valid())   { device_->Destroy(vertex_buffer_);   vertex_buffer_   = {}; }
+    if (pipeline_.valid())        { device_->Destroy(pipeline_);        pipeline_        = {}; }
+    if (fragment_shader_.valid()) { device_->Destroy(fragment_shader_); fragment_shader_ = {}; }
+    if (vertex_shader_.valid())   { device_->Destroy(vertex_shader_);   vertex_shader_   = {}; }
+    if (swapchain_.valid())       { device_->Destroy(swapchain_);       swapchain_       = {}; }
 
     initialized_ = false;
     device_ = nullptr;

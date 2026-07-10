@@ -335,7 +335,7 @@ uint32_t FVulkanDevice::FindMemoryType(uint32_t type_bits, VkMemoryPropertyFlags
 // ----- Resource creation -----
 
 RHIBufferHandle FVulkanDevice::CreateBuffer(const RHIBufferDesc& desc) {
-    if (desc.size_bytes == 0) { return {0}; }
+    if (desc.size_bytes == 0) { return {}; }
 
     VkBufferUsageFlags usage = 0;
     if (any(desc.usage, ERHIBufferUsage::VertexBuffer))  { usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; }
@@ -362,7 +362,7 @@ RHIBufferHandle FVulkanDevice::CreateBuffer(const RHIBufferDesc& desc) {
     if (mem_type == UINT32_MAX) {
         ENGINE_LOG_ERROR(LogVulkanRHI, "No host-visible+coherent memory type for buffer");
         vkDestroyBuffer(device_, payload.buffer, nullptr);
-        return {0};
+        return {};
     }
 
     VkMemoryAllocateInfo ai{};
@@ -385,7 +385,7 @@ RHIBufferHandle FVulkanDevice::CreateBuffer(const RHIBufferDesc& desc) {
 RHIShaderHandle FVulkanDevice::CreateShader(const RHIShaderDesc& desc) {
     if (desc.spirv.data == nullptr || desc.spirv.size == 0) {
         ENGINE_LOG_ERROR(LogVulkanRHI, "CreateShader: empty SPIR-V");
-        return {0};
+        return {};
     }
     VkShaderModuleCreateInfo info{};
     info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -508,7 +508,7 @@ RHIPipelineHandle FVulkanDevice::CreateGraphicsPipeline(const RHIGraphicsPipelin
 RHISwapchainHandle FVulkanDevice::CreateSwapchain(const RHISwapchainDesc& desc) {
     if (create_surface_ == nullptr) {
         ENGINE_LOG_ERROR(LogVulkanRHI, "CreateSwapchain called but create_surface callback is null");
-        return {0};
+        return {};
     }
 
     VulkanSwapchainPayload payload;
@@ -521,7 +521,7 @@ RHISwapchainHandle FVulkanDevice::CreateSwapchain(const RHISwapchainDesc& desc) 
                                             &surface_opaque);
     if (!sr.ok() || surface_opaque == nullptr) {
         ENGINE_LOG_ERROR(LogVulkanRHI, "PAL create_surface failed: code {}", sr.code);
-        return {0};
+        return {};
     }
     payload.surface = static_cast<VkSurfaceKHR>(surface_opaque);
 
@@ -532,7 +532,7 @@ RHISwapchainHandle FVulkanDevice::CreateSwapchain(const RHISwapchainDesc& desc) 
     if (present_supported == VK_FALSE) {
         ENGINE_LOG_ERROR(LogVulkanRHI, "Graphics queue family does not support present on this surface");
         vkDestroySurfaceKHR(instance_, payload.surface, nullptr);
-        return {0};
+        return {};
     }
 
     // 3. Surface capabilities + format/present mode selection.
@@ -566,7 +566,7 @@ RHISwapchainHandle FVulkanDevice::CreateSwapchain(const RHISwapchainDesc& desc) 
     if (chosen.format == VK_FORMAT_UNDEFINED) {
         ENGINE_LOG_ERROR(LogVulkanRHI, "No sRGB swapchain format on this surface");
         vkDestroySurfaceKHR(instance_, payload.surface, nullptr);
-        return {0};
+        return {};
     }
     payload.format = chosen.format;
 

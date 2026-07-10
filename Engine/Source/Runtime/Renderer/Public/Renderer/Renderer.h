@@ -38,11 +38,11 @@ private:
     IWindow*           window_   = nullptr;
     bool               initialized_ = false;
 
-    RHISwapchainHandle swapchain_       = {0};
-    RHIShaderHandle    vertex_shader_   = {0};
-    RHIShaderHandle    fragment_shader_ = {0};
-    RHIPipelineHandle  pipeline_        = {0};
-    RHIBufferHandle    vertex_buffer_   = {0};
+    RHISwapchainHandle swapchain_       = {};
+    RHIShaderHandle    vertex_shader_   = {};
+    RHIShaderHandle    fragment_shader_ = {};
+    RHIPipelineHandle  pipeline_        = {};
+    RHIBufferHandle    vertex_buffer_   = {};
 
     uint32             swapchain_width_  = 0;
     uint32             swapchain_height_ = 0;
