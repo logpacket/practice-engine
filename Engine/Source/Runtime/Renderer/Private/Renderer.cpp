@@ -7,6 +7,8 @@
 #include <RHI/IRHICommandList.h>
 #include <RHI/IRHIDevice.h>
 
+#include <RenderGraph/RenderGraph.h>
+
 #include <ApplicationCore/IWindow.h>
 
 #include <array>
@@ -29,6 +31,12 @@ constexpr Vertex kTriangle[3] = {
     {{ 0.5f,  0.5f}, {0.0f, 1.0f, 0.0f}},  // bottom-right (green)
     {{ 0.0f, -0.5f}, {0.0f, 0.0f, 1.0f}},  // top-middle   (blue)
 };
+
+// Offscreen scene-target formats (§6.d). Color matches the swapchain format
+// so the scene pipeline serves both targets until the composite pipeline
+// lands in §6.e.
+constexpr ERHIFormat kOffscreenColorFormat = ERHIFormat::B8G8R8A8_SRGB;
+constexpr ERHIFormat kOffscreenDepthFormat = ERHIFormat::D32_SFLOAT;
 
 std::vector<uint8> LoadShaderBytes(const std::filesystem::path& path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -72,7 +80,12 @@ bool FRenderer::Init(IRHIDevice& device, IWindow& window) {
         return false;
     }
 
-    // 2. Shaders - load from Binaries/<Platform>/<Config>/Shaders/Triangle.{vert,frag}.spv
+    // 2. Offscreen scene targets (§6.d)
+    if (!CreateOffscreenTargets(swapchain_width_, swapchain_height_)) {
+        return false;
+    }
+
+    // 3. Shaders - load from Binaries/<Platform>/<Config>/Shaders/Triangle.{vert,frag}.spv
     const auto vs_path = FPaths::ShadersDir() / "Triangle.vert.spv";
     const auto fs_path = FPaths::ShadersDir() / "Triangle.frag.spv";
 
@@ -100,26 +113,27 @@ bool FRenderer::Init(IRHIDevice& device, IWindow& window) {
         return false;
     }
 
-    // 3. Graphics pipeline (uses dynamic rendering, color attachment matches swapchain format)
+    // 4. Scene pipeline: renders into the offscreen color+depth targets.
     constexpr std::array<RHIVertexAttribute, 2> attrs = {{
         {0, /*offset*/ 0,                 ERHIFormat::R32G32_SFLOAT},     // in_position
         {1, /*offset*/ sizeof(float) * 2, ERHIFormat::R32G32B32_SFLOAT},  // in_color
     }};
 
     RHIGraphicsPipelineDesc gp_desc{};
-    gp_desc.vertex_shader            = vertex_shader_;
-    gp_desc.fragment_shader          = fragment_shader_;
-    gp_desc.vertex_stride            = sizeof(Vertex);
-    gp_desc.vertex_attributes        = {attrs.data(), attrs.size()};
-    gp_desc.color_attachment_format  = ERHIFormat::B8G8R8A8_SRGB;
+    gp_desc.vertex_shader           = vertex_shader_;
+    gp_desc.fragment_shader         = fragment_shader_;
+    gp_desc.vertex_stride           = sizeof(Vertex);
+    gp_desc.vertex_attributes       = {attrs.data(), attrs.size()};
+    gp_desc.color_attachment_format = kOffscreenColorFormat;
+    gp_desc.depth_attachment_format = kOffscreenDepthFormat;
 
-    pipeline_ = device_->CreateGraphicsPipeline(gp_desc);
-    if (!pipeline_.valid()) {
-        ENGINE_LOG_ERROR(LogRenderer, "CreateGraphicsPipeline failed");
+    scene_pipeline_ = device_->CreateGraphicsPipeline(gp_desc);
+    if (!scene_pipeline_.valid()) {
+        ENGINE_LOG_ERROR(LogRenderer, "CreateGraphicsPipeline (scene) failed");
         return false;
     }
 
-    // 4. Vertex buffer (host-visible, uploaded once at creation time)
+    // 5. Vertex buffer (host-visible, uploaded once at creation time)
     RHIBufferDesc vb_desc{};
     vb_desc.size_bytes   = sizeof(kTriangle);
     vb_desc.usage        = ERHIBufferUsage::VertexBuffer;
@@ -137,6 +151,113 @@ bool FRenderer::Init(IRHIDevice& device, IWindow& window) {
     return true;
 }
 
+bool FRenderer::CreateOffscreenTargets(uint32 width, uint32 height) {
+    RHITextureDesc color_desc{};
+    color_desc.width  = width;
+    color_desc.height = height;
+    color_desc.format = kOffscreenColorFormat;
+    color_desc.usage  = ERHITextureUsage::RenderTarget | ERHITextureUsage::Sampled;
+    offscreen_color_ = device_->CreateTexture(color_desc);
+
+    RHITextureDesc depth_desc{};
+    depth_desc.width  = width;
+    depth_desc.height = height;
+    depth_desc.format = kOffscreenDepthFormat;
+    depth_desc.usage  = ERHITextureUsage::DepthStencil;
+    offscreen_depth_ = device_->CreateTexture(depth_desc);
+
+    if (!offscreen_color_.valid() || !offscreen_depth_.valid()) {
+        ENGINE_LOG_ERROR(LogRenderer, "CreateTexture (offscreen targets) failed");
+        return false;
+    }
+    return true;
+}
+
+void FRenderer::DestroyOffscreenTargets() {
+    if (offscreen_color_.valid()) { device_->Destroy(offscreen_color_); offscreen_color_ = {}; }
+    if (offscreen_depth_.valid()) { device_->Destroy(offscreen_depth_); offscreen_depth_ = {}; }
+}
+
+void FRenderer::ExecuteScenePassThunk(IRHICommandList& cmd, void* userdata) {
+    static_cast<FRenderer*>(userdata)->RecordScenePass(cmd);
+}
+
+void FRenderer::ExecuteCompositePassThunk(IRHICommandList& cmd, void* userdata) {
+    static_cast<FRenderer*>(userdata)->RecordCompositePass(cmd);
+}
+
+void FRenderer::RecordScenePass(IRHICommandList& cmd) {
+    RHIRenderPassColorAttachment color_att{};
+    color_att.texture       = offscreen_color_;
+    color_att.clear.rgba[0] = 0.1f;
+    color_att.clear.rgba[1] = 0.1f;
+    color_att.clear.rgba[2] = 0.15f;
+    color_att.clear.rgba[3] = 1.0f;
+
+    RHIRenderPassBeginInfo pass{};
+    pass.color_attachments  = {&color_att, 1};
+    pass.depth.texture      = offscreen_depth_;
+    pass.depth.clear_depth  = 1.0f;
+    pass.render_area.width  = swapchain_width_;
+    pass.render_area.height = swapchain_height_;
+
+    cmd.BeginRenderPass(pass);
+
+    RHIViewport vp{};
+    vp.width  = static_cast<float>(swapchain_width_);
+    vp.height = static_cast<float>(swapchain_height_);
+    vp.max_depth = 1.0f;
+    cmd.SetViewport(vp);
+
+    RHIRect scissor{};
+    scissor.width  = swapchain_width_;
+    scissor.height = swapchain_height_;
+    cmd.SetScissor(scissor);
+
+    cmd.SetPipeline(scene_pipeline_);
+    cmd.SetVertexBuffer(vertex_buffer_, 0);
+    cmd.Draw(3, 0);
+
+    cmd.EndRenderPass();
+}
+
+void FRenderer::RecordCompositePass(IRHICommandList& cmd) {
+    RHIRenderPassColorAttachment color_att{};
+    color_att.texture       = frame_backbuffer_;
+    color_att.clear.rgba[0] = 0.1f;
+    color_att.clear.rgba[1] = 0.1f;
+    color_att.clear.rgba[2] = 0.15f;
+    color_att.clear.rgba[3] = 1.0f;
+
+    RHIRenderPassBeginInfo pass{};
+    pass.color_attachments  = {&color_att, 1};
+    pass.render_area.width  = swapchain_width_;
+    pass.render_area.height = swapchain_height_;
+
+    cmd.BeginRenderPass(pass);
+
+    RHIViewport vp{};
+    vp.width  = static_cast<float>(swapchain_width_);
+    vp.height = static_cast<float>(swapchain_height_);
+    vp.max_depth = 1.0f;
+    cmd.SetViewport(vp);
+
+    RHIRect scissor{};
+    scissor.width  = swapchain_width_;
+    scissor.height = swapchain_height_;
+    cmd.SetScissor(scissor);
+
+    // §6.d placeholder body: draws the triangle directly so HelloTriangle
+    // stays visually correct (G1) while the graph already schedules the real
+    // two-pass barrier chain (offscreen RenderTarget -> ShaderResource).
+    // §6.e replaces this with a fullscreen draw sampling the offscreen color.
+    cmd.SetPipeline(scene_pipeline_);
+    cmd.SetVertexBuffer(vertex_buffer_, 0);
+    cmd.Draw(3, 0);
+
+    cmd.EndRenderPass();
+}
+
 void FRenderer::RenderFrame() {
     if (!initialized_) { return; }
 
@@ -146,64 +267,46 @@ void FRenderer::RenderFrame() {
         return;
     }
     const uint32 image_index = acquired.image_index;
+    frame_backbuffer_ = device_->GetSwapchainImageTexture(swapchain_, image_index);
+
+    // Build the frame graph (ADR-0023): ScenePass renders the triangle into
+    // the offscreen targets; CompositePass consumes the offscreen color and
+    // writes the backbuffer. Barriers are computed by the graph (ADR-0022).
+    graph_.Reset();
+
+    const RGResourceAccess scene_writes[] = {
+        {offscreen_color_, ERHIResourceState::RenderTarget},
+        {offscreen_depth_, ERHIResourceState::DepthAttachment},
+    };
+    RGPassDesc scene{};
+    scene.name     = "ScenePass";
+    scene.writes   = {scene_writes, 2};
+    scene.execute  = &FRenderer::ExecuteScenePassThunk;
+    scene.userdata = this;
+    graph_.AddPass(scene);
+
+    const RGResourceAccess composite_reads[]  = {
+        {offscreen_color_, ERHIResourceState::ShaderResource},
+    };
+    const RGResourceAccess composite_writes[] = {
+        {frame_backbuffer_, ERHIResourceState::RenderTarget},
+    };
+    RGPassDesc composite{};
+    composite.name     = "CompositePass";
+    composite.reads    = {composite_reads, 1};
+    composite.writes   = {composite_writes, 1};
+    composite.execute  = &FRenderer::ExecuteCompositePassThunk;
+    composite.userdata = this;
+    graph_.AddPass(composite);
+
+    graph_.SetFinalState(frame_backbuffer_, ERHIResourceState::Present);
 
     RHICommandListHandle cmd_h = device_->AcquireCommandList();
     IRHICommandList*     cmd   = device_->Lock(cmd_h);
 
-    // §6.c interim: the Renderer emits the two swapchain barriers itself via
-    // the new ResourceBarrier API. §6.d moves barrier emission into the
-    // RenderGraph (ADR-0022/0023).
-    const RHITextureHandle backbuffer =
-        device_->GetSwapchainImageTexture(swapchain_, image_index);
-
     cmd->Begin();
-
-    const RHIResourceBarrier to_render_target{
-        backbuffer, ERHIResourceState::Undefined, ERHIResourceState::RenderTarget};
-    cmd->ResourceBarrier({&to_render_target, 1});
-
-    RHIRenderPassColorAttachment color_att{};
-    color_att.texture       = backbuffer;
-    color_att.clear.rgba[0] = 0.1f;
-    color_att.clear.rgba[1] = 0.1f;
-    color_att.clear.rgba[2] = 0.15f;
-    color_att.clear.rgba[3] = 1.0f;
-
-    RHIRenderPassBeginInfo pass{};
-    pass.color_attachments  = {&color_att, 1};
-    pass.render_area.x      = 0;
-    pass.render_area.y      = 0;
-    pass.render_area.width  = swapchain_width_;
-    pass.render_area.height = swapchain_height_;
-
-    cmd->BeginRenderPass(pass);
-
-    RHIViewport vp{};
-    vp.x         = 0.0f;
-    vp.y         = 0.0f;
-    vp.width     = static_cast<float>(swapchain_width_);
-    vp.height    = static_cast<float>(swapchain_height_);
-    vp.min_depth = 0.0f;
-    vp.max_depth = 1.0f;
-    cmd->SetViewport(vp);
-
-    RHIRect scissor{};
-    scissor.x      = 0;
-    scissor.y      = 0;
-    scissor.width  = swapchain_width_;
-    scissor.height = swapchain_height_;
-    cmd->SetScissor(scissor);
-
-    cmd->SetPipeline(pipeline_);
-    cmd->SetVertexBuffer(vertex_buffer_, 0);
-    cmd->Draw(3, 0);
-
-    cmd->EndRenderPass();
-
-    const RHIResourceBarrier to_present{
-        backbuffer, ERHIResourceState::RenderTarget, ERHIResourceState::Present};
-    cmd->ResourceBarrier({&to_present, 1});
-
+    // Barrier introspection (G7 tool): log the inferred schedule once.
+    graph_.Execute(*cmd, /*log_barriers=*/frame_number_ == 0);
     cmd->End();
 
     // Boundary submit (ADR-0027): the present owner supplies the swapchain's
@@ -218,6 +321,7 @@ void FRenderer::RenderFrame() {
 
     device_->Submit(cmd_h, submit);
     device_->Present(swapchain_, image_index);
+    frame_backbuffer_ = {};
 }
 
 void FRenderer::Shutdown() {
@@ -226,9 +330,11 @@ void FRenderer::Shutdown() {
     device_->WaitIdle();
 
     if (vertex_buffer_.valid())   { device_->Destroy(vertex_buffer_);   vertex_buffer_   = {}; }
-    if (pipeline_.valid())        { device_->Destroy(pipeline_);        pipeline_        = {}; }
+    if (scene_pipeline_.valid())  { device_->Destroy(scene_pipeline_);  scene_pipeline_  = {}; }
     if (fragment_shader_.valid()) { device_->Destroy(fragment_shader_); fragment_shader_ = {}; }
     if (vertex_shader_.valid())   { device_->Destroy(vertex_shader_);   vertex_shader_   = {}; }
+    DestroyOffscreenTargets();
+    device_->WaitIdle();  // drain deferred deletes before the swapchain goes
     if (swapchain_.valid())       { device_->Destroy(swapchain_);       swapchain_       = {}; }
 
     initialized_ = false;

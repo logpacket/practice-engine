@@ -83,13 +83,14 @@ if(NOT WIN32)
         VERBATIM)
 endif()
 
-add_subdirectory(Engine/Source/Runtime/Core)                 # §6.b
-add_subdirectory(Engine/Source/Runtime/RHI)                  # §6.c (interface)
-add_subdirectory(Engine/Source/Runtime/RHIBackends)          # §6.c (Vulkan; ADR-0019)
-add_subdirectory(Engine/Source/Runtime/ApplicationCore)      # §6.d (interface)
-add_subdirectory(Engine/Source/Runtime/Platforms)            # §6.d (GLFW; ADR-0018/0019)
-add_subdirectory(Engine/Source/Runtime/Renderer)             # §6.e
-add_subdirectory(Engine/Source/Runtime/Launch)               # §6.f
+add_subdirectory(Engine/Source/Runtime/Core)                 # Stage 1 §6.b
+add_subdirectory(Engine/Source/Runtime/RHI)                  # Stage 1 §6.c (interface)
+add_subdirectory(Engine/Source/Runtime/RHIBackends)          # Stage 1 §6.c (Vulkan; ADR-0019)
+add_subdirectory(Engine/Source/Runtime/ApplicationCore)      # Stage 1 §6.d (interface)
+add_subdirectory(Engine/Source/Runtime/Platforms)            # Stage 1 §6.d (GLFW; ADR-0018/0019)
+add_subdirectory(Engine/Source/Runtime/RenderGraph)          # Stage 2 §6.d (ADR-0023)
+add_subdirectory(Engine/Source/Runtime/Renderer)             # Stage 1 §6.e
+add_subdirectory(Engine/Source/Runtime/Launch)               # Stage 1 §6.f
 
 if(ENGINE_BUILD_TESTS)
     add_subdirectory(Engine/Source/Runtime/Tests/DummyModule)

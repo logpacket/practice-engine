@@ -11,6 +11,8 @@
 #include <RHI/IRHICommandList.h>
 #include <RHI/IRHIDevice.h>
 
+#include <RenderGraph/RenderGraph.h>
+
 #include <ApplicationCore/IWindow.h>
 
 #include <array>
