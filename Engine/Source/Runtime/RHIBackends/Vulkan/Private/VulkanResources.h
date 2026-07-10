@@ -47,6 +47,9 @@ struct VulkanSwapchainPayload {
     VkSwapchainKHR            swapchain  = VK_NULL_HANDLE;
     VkFormat                  format     = VK_FORMAT_UNDEFINED;
     VkExtent2D                extent     = {0, 0};
+    // Original request, kept for RecreateSwapchain (ADR-0026).
+    ERHIPresentMode           preferred_present_mode = ERHIPresentMode::FIFO;
+    uint32_t                  desired_image_count    = 2;
     std::vector<VkImage>      images;        // borrowed from swapchain (do not destroy)
     std::vector<VkImageView>  image_views;   // owned by us
     // Borrowed-texture wrappers over images[] (ADR-0021/0026). Allocated at

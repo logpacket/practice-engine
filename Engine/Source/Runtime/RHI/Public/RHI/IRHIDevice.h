@@ -32,6 +32,13 @@ public:
     virtual RHITextureHandle GetSwapchainImageTexture(RHISwapchainHandle swapchain,
                                                       uint32 image_index) = 0;
 
+    // Rebuilds the swapchain at the new size on the same surface and handle
+    // (ADR-0026). Stalls the device internally. Every previously returned
+    // swapchain-image texture handle is invalidated (generation bump) -
+    // consumers re-fetch after this call.
+    virtual EngineResult RecreateSwapchain(RHISwapchainHandle swapchain,
+                                           uint32 width, uint32 height) = 0;
+
     // --- Resource destruction ---------------------------------------------
     // Deferred-delete (ADR-0021): Destroy enqueues the backend payload stamped
     // with the current frame value; it is reclaimed once the frame timeline

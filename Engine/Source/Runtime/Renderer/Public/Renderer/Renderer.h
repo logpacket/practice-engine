@@ -30,7 +30,11 @@ public:
 
     // Set up GPU resources (swapchain, offscreen targets, shaders, pipeline,
     // vertex buffer). Returns false on any failure (errors are logged).
-    bool Init(IRHIDevice& device, IWindow& window);
+    // preferred_present_mode defaults to MAILBOX (§6.f); the backend falls
+    // back to Immediate then FIFO when unsupported. Tests pass FIFO to make
+    // the G8 frames-in-flight overlap deterministic (vsync backpressure).
+    bool Init(IRHIDevice& device, IWindow& window,
+              ERHIPresentMode preferred_present_mode = ERHIPresentMode::MAILBOX);
 
     // Render one frame: acquire, build the two-pass graph, submit, present.
     // No-op if Init failed.
@@ -40,6 +44,10 @@ public:
     // composited swapchain pixel (x, y) as RGBA8 right before present.
     // Stalls the device - test/verification use only, never the steady loop.
     bool RenderFrameWithReadback(uint32 x, uint32 y, uint8 out_rgba[4]);
+
+    // G10 instrument: forces the swapchain + offscreen-target recreation path
+    // (equivalent to a programmatic resize / forced out-of-date).
+    void ForceRecreate();
 
     // Release GPU resources. Safe to call multiple times.
     void Shutdown();
@@ -53,6 +61,7 @@ private:
 
     bool CreateOffscreenTargets(uint32 width, uint32 height);
     void DestroyOffscreenTargets();
+    bool RecreateSizedResources();
 
     struct FReadbackRequest {
         uint32 x = 0;

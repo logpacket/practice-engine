@@ -74,8 +74,20 @@ void FVulkanCommandList::ResourceBarrier(EngineSpan<const RHIResourceBarrier> ba
     for (uint64_t i = 0; i < barriers.size; ++i) {
         const RHIResourceBarrier& b   = barriers.data[i];
         auto*                     tex = device_.GetTexturePayload(b.texture);
-        const FStateInfo          src = ToStateInfo(b.before);
+        FStateInfo                src = ToStateInfo(b.before);
         const FStateInfo          dst = ToStateInfo(b.after);
+
+        // Undefined-source transitions discard contents, but the write the
+        // transition performs must still be ordered after (1) the acquire
+        // semaphore wait when the image is a just-acquired swapchain image -
+        // synchronization2 validation chains via stage-mask intersection, so
+        // ALL_COMMANDS covers the boundary submit's wait stage - and (2) the
+        // previous frame's reads/writes when a render target is reused with
+        // discard (the graph resets every texture to Undefined per frame).
+        if (b.before == ERHIResourceState::Undefined) {
+            src.stage  = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            src.access = VK_ACCESS_2_MEMORY_WRITE_BIT;
+        }
 
         VkImageMemoryBarrier2 barrier{};
         barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;

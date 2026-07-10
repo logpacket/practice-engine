@@ -801,7 +801,20 @@ RHISwapchainHandle FVulkanDevice::CreateSwapchain(const RHISwapchainDesc& desc) 
         return {};
     }
 
-    // 3. Surface capabilities + format/present mode selection.
+    // 3. Everything swapchain-owned (shared with RecreateSwapchain).
+    payload.preferred_present_mode = desc.preferred_present_mode;
+    payload.desired_image_count    = desc.image_count;
+    payload.format                 = ToVkFormat(desc.preferred_format);
+    if (!InitSwapchainObjects(payload, desc.width, desc.height)) {
+        vkDestroySurfaceKHR(instance_, payload.surface, nullptr);
+        return {};
+    }
+    return swapchains_.Insert(std::move(payload));
+}
+
+bool FVulkanDevice::InitSwapchainObjects(VulkanSwapchainPayload& payload,
+                                         uint32_t width, uint32_t height) {
+    // Surface capabilities + format/present-mode selection.
     VkSurfaceCapabilitiesKHR caps{};
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device_, payload.surface, &caps);
 
@@ -810,7 +823,7 @@ RHISwapchainHandle FVulkanDevice::CreateSwapchain(const RHISwapchainDesc& desc) 
     std::vector<VkSurfaceFormatKHR> formats(fmt_count);
     vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device_, payload.surface, &fmt_count, formats.data());
 
-    const VkFormat preferred = ToVkFormat(desc.preferred_format);
+    const VkFormat preferred = payload.format;
     VkSurfaceFormatKHR chosen{};
     chosen.format = VK_FORMAT_UNDEFINED;
     for (const auto& f : formats) {
@@ -819,9 +832,8 @@ RHISwapchainHandle FVulkanDevice::CreateSwapchain(const RHISwapchainDesc& desc) 
         }
     }
     if (chosen.format == VK_FORMAT_UNDEFINED) {
-        // Stage 1 sRGB policy (Architecture.md §3.6): accept either of the two
-        // standard sRGB color formats. If the surface offers neither we FATAL,
-        // because the design forbids non-sRGB swapchain in Stage 1.
+        // sRGB policy (Architecture.md §3.6): accept either standard sRGB
+        // color format; a non-sRGB swapchain is forbidden.
         for (const auto& f : formats) {
             if ((f.format == VK_FORMAT_B8G8R8A8_SRGB || f.format == VK_FORMAT_R8G8B8A8_SRGB) &&
                 f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
@@ -831,15 +843,58 @@ RHISwapchainHandle FVulkanDevice::CreateSwapchain(const RHISwapchainDesc& desc) 
     }
     if (chosen.format == VK_FORMAT_UNDEFINED) {
         ENGINE_LOG_ERROR(LogVulkanRHI, "No sRGB swapchain format on this surface");
-        vkDestroySurfaceKHR(instance_, payload.surface, nullptr);
-        return {};
+        return false;
     }
     payload.format = chosen.format;
 
-    // FIFO is guaranteed by the Vulkan spec to be supported on every surface.
-    const VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
+    // Present mode (§6.f, gate G11): preferred -> Immediate -> FIFO. FIFO is
+    // guaranteed by the spec on every surface.
+    uint32_t pm_count = 0;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device_, payload.surface, &pm_count, nullptr);
+    std::vector<VkPresentModeKHR> modes(pm_count);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device_, payload.surface, &pm_count, modes.data());
 
-    uint32_t image_count = std::max(desc.image_count, caps.minImageCount);
+    const auto supported = [&modes](VkPresentModeKHR m) {
+        return std::find(modes.begin(), modes.end(), m) != modes.end();
+    };
+    const auto to_vk_mode = [](ERHIPresentMode m) {
+        switch (m) {
+            case ERHIPresentMode::MAILBOX:   return VK_PRESENT_MODE_MAILBOX_KHR;
+            case ERHIPresentMode::Immediate: return VK_PRESENT_MODE_IMMEDIATE_KHR;
+            case ERHIPresentMode::FIFO:
+            default:                         return VK_PRESENT_MODE_FIFO_KHR;
+        }
+    };
+    const auto mode_name = [](VkPresentModeKHR m) {
+        switch (m) {
+            case VK_PRESENT_MODE_MAILBOX_KHR:   return "MAILBOX";
+            case VK_PRESENT_MODE_IMMEDIATE_KHR: return "Immediate";
+            default:                            return "FIFO";
+        }
+    };
+
+    VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
+    const VkPresentModeKHR wanted = to_vk_mode(payload.preferred_present_mode);
+    if (supported(wanted)) {
+        present_mode = wanted;
+    } else if (supported(VK_PRESENT_MODE_IMMEDIATE_KHR)) {
+        present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+    }
+    ENGINE_LOG_INFO(LogVulkanRHI, "[present_mode] {} (preferred={})",
+                    mode_name(present_mode), mode_name(wanted));
+
+    // Extent: honor the surface's fixed extent when it reports one, else
+    // clamp the requested size to the supported range.
+    VkExtent2D extent{width, height};
+    if (caps.currentExtent.width != UINT32_MAX) {
+        extent = caps.currentExtent;
+    } else {
+        extent.width  = std::clamp(extent.width,  caps.minImageExtent.width,  caps.maxImageExtent.width);
+        extent.height = std::clamp(extent.height, caps.minImageExtent.height, caps.maxImageExtent.height);
+    }
+    payload.extent = extent;
+
+    uint32_t image_count = std::max(payload.desired_image_count, caps.minImageCount);
     if (caps.maxImageCount > 0 && image_count > caps.maxImageCount) {
         image_count = caps.maxImageCount;
     }
@@ -866,7 +921,7 @@ RHISwapchainHandle FVulkanDevice::CreateSwapchain(const RHISwapchainDesc& desc) 
 
     PE_VK_CHECK(vkCreateSwapchainKHR(device_, &sci, nullptr, &payload.swapchain));
 
-    // 4. Retrieve images + create image views.
+    // Retrieve images + create image views.
     uint32_t got_count = 0;
     vkGetSwapchainImagesKHR(device_, payload.swapchain, &got_count, nullptr);
     payload.images.resize(got_count);
@@ -888,9 +943,10 @@ RHISwapchainHandle FVulkanDevice::CreateSwapchain(const RHISwapchainDesc& desc) 
         PE_VK_CHECK(vkCreateImageView(device_, &ivci, nullptr, &payload.image_views[i]));
     }
 
-    // 5. Borrowed-texture wrappers (ADR-0021/0026): one pool slot per image,
-    //    allocated here (not per GetSwapchainImageTexture call). Image and
-    //    view stay owned by this payload; the wrapper is external.
+    // Borrowed-texture wrappers (ADR-0021/0026): one pool slot per image,
+    // allocated here (not per GetSwapchainImageTexture call). Image and view
+    // stay owned by this payload; the wrapper is external. On recreate the
+    // slots are new, so pre-resize handles are a generation-mismatch FATAL.
     payload.image_textures.resize(got_count);
     for (uint32_t i = 0; i < got_count; ++i) {
         VulkanTexturePayload wrapper;
@@ -902,11 +958,11 @@ RHISwapchainHandle FVulkanDevice::CreateSwapchain(const RHISwapchainDesc& desc) 
         payload.image_textures[i] = textures_.Insert(std::move(wrapper));
     }
 
-    // 6. Sync objects (ADR-0020): binary semaphores survive only at the
-    //    swapchain boundary - image_available per frame slot (the timeline
-    //    wait at frame start guarantees the slot's previous acquire semaphore
-    //    was consumed), render_finished per image (the presentation engine may
-    //    still hold the previous signal of the prior image).
+    // Sync objects (ADR-0020): binary semaphores survive only at the
+    // swapchain boundary - image_available per frame slot (the timeline wait
+    // at frame start guarantees the slot's previous acquire semaphore was
+    // consumed), render_finished per image (the presentation engine may
+    // still hold the previous signal of the prior image).
     VkSemaphoreCreateInfo sem_ci{};
     sem_ci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
@@ -920,8 +976,25 @@ RHISwapchainHandle FVulkanDevice::CreateSwapchain(const RHISwapchainDesc& desc) 
     }
 
     ENGINE_LOG_INFO(LogVulkanRHI, "Swapchain created: {}x{}, {} images, format={}",
-                    desc.width, desc.height, got_count, static_cast<int>(chosen.format));
-    return swapchains_.Insert(std::move(payload));
+                    payload.extent.width, payload.extent.height, got_count,
+                    static_cast<int>(chosen.format));
+    return true;
+}
+
+EngineResult FVulkanDevice::RecreateSwapchain(RHISwapchainHandle h, uint32_t width, uint32_t height) {
+    auto* p = swapchains_.Get(h);
+
+    // Recreation is a stall by design (ADR-0026): the presentation engine and
+    // in-flight frames must release the old images first.
+    vkDeviceWaitIdle(device_);
+    DrainDeferred(UINT64_MAX);
+
+    ReleaseSwapchainObjects(*p);
+    if (!InitSwapchainObjects(*p, width, height)) {
+        ENGINE_LOG_ERROR(LogVulkanRHI, "RecreateSwapchain failed");
+        return EngineResult::Fail(-1);
+    }
+    return EngineResult::Ok();
 }
 
 // ----- Destroy -----
@@ -957,10 +1030,11 @@ void FVulkanDevice::DestroySamplerPayload(VulkanSamplerPayload& p) {
     if (p.sampler != VK_NULL_HANDLE) { vkDestroySampler(device_, p.sampler, nullptr); p.sampler = VK_NULL_HANDLE; }
 }
 
-void FVulkanDevice::DestroySwapchainPayload(VulkanSwapchainPayload& p) {
+void FVulkanDevice::ReleaseSwapchainObjects(VulkanSwapchainPayload& p) {
     // Remove the borrowed-texture wrappers first: bumps their generation so a
     // cached handle from before destroy/recreate is a Debug FATAL (ADR-0026).
     for (RHITextureHandle t : p.image_textures) {
+        InvalidateDescriptorSets(HandleKey(t), /*sampler_key=*/0);
         auto wrapper = textures_.Remove(t);
         DestroyTexturePayload(wrapper);  // external: no-op on GPU objects
     }
@@ -978,7 +1052,11 @@ void FVulkanDevice::DestroySwapchainPayload(VulkanSwapchainPayload& p) {
     p.image_views.clear();
     p.images.clear();
     if (p.swapchain != VK_NULL_HANDLE) { vkDestroySwapchainKHR(device_, p.swapchain, nullptr); p.swapchain = VK_NULL_HANDLE; }
-    if (p.surface != VK_NULL_HANDLE)   { vkDestroySurfaceKHR(instance_, p.surface, nullptr); p.surface = VK_NULL_HANDLE; }
+}
+
+void FVulkanDevice::DestroySwapchainPayload(VulkanSwapchainPayload& p) {
+    ReleaseSwapchainObjects(p);
+    if (p.surface != VK_NULL_HANDLE) { vkDestroySurfaceKHR(instance_, p.surface, nullptr); p.surface = VK_NULL_HANDLE; }
 }
 
 void FVulkanDevice::DestroyCommandListPayload(VulkanCommandListPayload& p) {
@@ -1145,6 +1223,18 @@ RHIAcquiredImage FVulkanDevice::AcquireNextSwapchainImage(RHISwapchainHandle h) 
     const uint64_t next_value = CurrentFrameValue();
     if (next_value > kMaxFramesInFlight) {
         const uint64_t wait_value = next_value - kMaxFramesInFlight;
+
+        // G8 structural instrument: the slot-reuse wait must target
+        // V - MAX_FRAMES_IN_FLIGHT (an off-by-one here silently serializes
+        // or races the ring - the failure ADR-0020 calls out). Logged once,
+        // grep-able as "[frames_in_flight] window=2".
+        ENGINE_CHECK(next_value - wait_value == kMaxFramesInFlight);
+        if (!pacing_window_logged_) {
+            pacing_window_logged_ = true;
+            ENGINE_LOG_INFO(LogVulkanRHI, "[frames_in_flight] window={} (frame {} waits value {})",
+                            kMaxFramesInFlight, next_value, wait_value);
+        }
+
         VkSemaphoreWaitInfo wi{};
         wi.sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
         wi.semaphoreCount = 1;

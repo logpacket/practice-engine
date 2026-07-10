@@ -34,6 +34,8 @@ public:
     RHISamplerHandle   CreateSampler(const RHISamplerDesc& desc) override;
     RHITextureHandle   GetSwapchainImageTexture(RHISwapchainHandle swapchain,
                                                 uint32_t image_index) override;
+    EngineResult       RecreateSwapchain(RHISwapchainHandle swapchain,
+                                         uint32_t width, uint32_t height) override;
 
     void Destroy(RHIBufferHandle handle) override;
     void Destroy(RHIShaderHandle handle) override;
@@ -86,6 +88,13 @@ private:
     // mask of VkMemoryPropertyFlagBits (HOST_VISIBLE|HOST_COHERENT etc.).
     uint32_t FindMemoryType(uint32_t type_bits, VkMemoryPropertyFlags properties) const;
 
+    // Builds everything swapchain-owned except the surface (swapchain, image
+    // views, borrowed-texture wrappers, semaphores). Shared by
+    // CreateSwapchain and RecreateSwapchain (ADR-0026).
+    bool InitSwapchainObjects(VulkanSwapchainPayload& payload, uint32_t width, uint32_t height);
+    // Destroys what InitSwapchainObjects built; keeps the surface.
+    void ReleaseSwapchainObjects(VulkanSwapchainPayload& payload);
+
     void DestroyBufferPayload(VulkanBufferPayload& p);
     void DestroyShaderPayload(VulkanShaderPayload& p);
     void DestroyPipelinePayload(VulkanPipelinePayload& p);
@@ -121,7 +130,8 @@ private:
 
     VkSemaphore frame_timeline_            = VK_NULL_HANDLE;
     uint64_t    submitted_timeline_value_  = 0;  // highest value passed to Submit
-    uint64_t    peak_frames_in_flight_     = 0;  // G8 instrument
+    uint64_t    peak_frames_in_flight_     = 0;  // G8 instrument (observed)
+    bool        pacing_window_logged_      = false;  // G8 instrument (structural)
 
     // --- Deferred-delete queues (ADR-0021) ---
     template <typename TPayload>

@@ -108,10 +108,14 @@ int main() {
 
     {
         pe::FRenderer renderer;
-        ENGINE_VERIFY(renderer.Init(*device, *window));
+        // FIFO makes G8 deterministic: vsync backpressure holds frame N's
+        // GPU-side image_available wait until vblank while the CPU records
+        // and submits frame N+1 - the [frames_in_flight] peak reaches 2.
+        ENGINE_VERIFY(renderer.Init(*device, *window, pe::ERHIPresentMode::FIFO));
 
-        // Warm up a few frames (also exercises the multi-frame ring).
-        for (int i = 0; i < 5; ++i) {
+        // Warm up frames: exercises the multi-frame ring and gives the G8
+        // outstanding-frame counter time to observe the overlap.
+        for (int i = 0; i < 30; ++i) {
             pa->PumpEvents();
             renderer.RenderFrame();
         }
@@ -136,6 +140,25 @@ int main() {
             }
         }
         ENGINE_LOG_INFO(LogRenderSmoke, "G12 OK: composited pixel matches the sampled scene");
+
+        // G10: force the recreation path (swapchain + offscreen targets +
+        // composite descriptor set) and verify rendering stays correct.
+        renderer.ForceRecreate();
+        for (int i = 0; i < 3; ++i) {
+            pa->PumpEvents();
+            renderer.RenderFrame();
+        }
+        pe::uint8 rgba2[4] = {0, 0, 0, 0};
+        ENGINE_VERIFY(renderer.RenderFrameWithReadback(8, 8, rgba2));
+        for (int c = 0; c < 4; ++c) {
+            if (!WithinTolerance(rgba2[c], expected[c], 4)) {
+                ENGINE_LOG_ERROR(LogRenderSmoke, "G10 FAIL: channel {} = {} (expected {})",
+                                 c, rgba2[c], expected[c]);
+                pe::log::Shutdown();
+                return 11;
+            }
+        }
+        ENGINE_LOG_INFO(LogRenderSmoke, "G10 OK: rendering survives forced swapchain recreation");
 
         device->WaitIdle();
         renderer.Shutdown();

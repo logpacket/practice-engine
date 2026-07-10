@@ -38,6 +38,12 @@ void GlfwKeyCallback(GLFWwindow* window, int key, int /*scancode*/, int action, 
     }
 }
 
+// Framebuffer resize -> dirty flag consumed by the frame loop (ADR-0026).
+void GlfwFramebufferSizeCallback(GLFWwindow* window, int /*width*/, int /*height*/) {
+    auto* wrapper = static_cast<FGLFWWindow*>(glfwGetWindowUserPointer(window));
+    if (wrapper != nullptr) { wrapper->MarkResized(); }
+}
+
 class FGLFWApplication final : public IPlatformApplication {
 public:
     EngineResult Initialize() override {
@@ -65,9 +71,9 @@ public:
         if (out_window == nullptr) { return EngineResult::Fail(-1); }
         *out_window = nullptr;
 
-        // Vulkan-aware: no GL context. Fixed size in Stage 1 (M2 in Architecture.md §6.d).
+        // Vulkan-aware: no GL context. Resizable since Stage 2 (ADR-0026).
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
         GLFWwindow* handle = glfwCreateWindow(static_cast<int>(desc.width),
                                               static_cast<int>(desc.height),
@@ -86,6 +92,8 @@ public:
         // Placement-new into our own allocator-managed slot would belong here in a
         // stricter design; Stage 1 uses operator new for simplicity (single window).
         auto* window = new FGLFWWindow(handle, native_window, native_display);
+        glfwSetWindowUserPointer(handle, window);
+        glfwSetFramebufferSizeCallback(handle, GlfwFramebufferSizeCallback);
         *out_window  = window;
         ENGINE_LOG_INFO(LogGLFW, "Window created: {}x{} '{}'", desc.width, desc.height, desc.title);
         return EngineResult::Ok();

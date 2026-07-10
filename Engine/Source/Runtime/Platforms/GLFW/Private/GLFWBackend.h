@@ -32,13 +32,17 @@ public:
     void*  GetNativeDisplayHandle() const override;
     uint32 GetWidth()  const override;
     uint32 GetHeight() const override;
+    bool   ConsumeResized() override;
 
     GLFWwindow* RawHandle() const noexcept { return handle_; }
+    // Called from the GLFW framebuffer-size callback (ADR-0026).
+    void        MarkResized() noexcept { resized_ = true; }
 
 private:
     GLFWwindow* handle_;
     void*       native_window_;
     void*       native_display_;
+    bool        resized_ = false;
 };
 
 }  // namespace pe::glfw_backend

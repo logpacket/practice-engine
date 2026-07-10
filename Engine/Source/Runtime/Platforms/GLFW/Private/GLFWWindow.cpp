@@ -43,4 +43,10 @@ uint32 FGLFWWindow::GetHeight() const {
     return static_cast<uint32>(h);
 }
 
+bool FGLFWWindow::ConsumeResized() {
+    const bool was = resized_;
+    resized_ = false;
+    return was;
+}
+
 }  // namespace pe::glfw_backend

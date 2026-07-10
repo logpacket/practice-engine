@@ -1,9 +1,9 @@
 // IWindow.h - per-window state interface.
 //
-// Stage 1 (§6.d) is fixed-resolution and non-resizable; swapchain recreation is
-// Stage 2 (Architecture.md §6.d "M2: window resize disabled"). Native handles are
-// opaque void* so consumers (VulkanRHI swapchain creation in §6.e) do not need
-// to know about GLFWwindow*.
+// Stage 2 (ADR-0026): windows are resizable; ConsumeResized surfaces the
+// resize signal the frame loop uses to trigger swapchain recreation. Native
+// handles are opaque void* so consumers (VulkanRHI swapchain creation) do not
+// need to know about GLFWwindow*.
 
 #pragma once
 
@@ -23,6 +23,11 @@ public:
 
     virtual uint32    GetWidth()  const = 0;
     virtual uint32    GetHeight() const = 0;
+
+    // Returns true once after the framebuffer size changed, then clears the
+    // flag (ADR-0026). The frame loop recreates the swapchain when this fires
+    // or when acquire/present reports out-of-date.
+    virtual bool      ConsumeResized() = 0;
 
 protected:
     ~IWindow() = default;  // owned by IPlatformApplication

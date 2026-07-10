@@ -59,7 +59,8 @@ std::vector<uint8> LoadShaderBytes(const std::filesystem::path& path) {
 FRenderer::FRenderer()  = default;
 FRenderer::~FRenderer() { Shutdown(); }
 
-bool FRenderer::Init(IRHIDevice& device, IWindow& window) {
+bool FRenderer::Init(IRHIDevice& device, IWindow& window,
+                     ERHIPresentMode preferred_present_mode) {
     device_ = &device;
     window_ = &window;
 
@@ -71,8 +72,8 @@ bool FRenderer::Init(IRHIDevice& device, IWindow& window) {
     sc_desc.width                  = swapchain_width_;
     sc_desc.height                 = swapchain_height_;
     sc_desc.preferred_format       = ERHIFormat::B8G8R8A8_SRGB;
-    sc_desc.preferred_present_mode = ERHIPresentMode::FIFO;
-    sc_desc.image_count            = 2;
+    sc_desc.preferred_present_mode = preferred_present_mode;  // §6.f
+    sc_desc.image_count            = 3;  // spare image for MAILBOX / CPU run-ahead
 
     swapchain_ = device_->CreateSwapchain(sc_desc);
     if (!swapchain_.valid()) {
@@ -318,12 +319,41 @@ bool FRenderer::RenderFrameWithReadback(uint32 x, uint32 y, uint8 out_rgba[4]) {
     return req.ok;
 }
 
+bool FRenderer::RecreateSizedResources() {
+    const uint32 w = window_->GetWidth();
+    const uint32 h = window_->GetHeight();
+    if (w == 0 || h == 0) { return false; }  // minimized: wait for a real size
+
+    if (!device_->RecreateSwapchain(swapchain_, w, h).ok()) { return false; }
+    // The offscreen targets track the swapchain size; their destroy goes
+    // through the deferred queue and the composite descriptor set is
+    // invalidated with them (rewritten on next SetTexture).
+    DestroyOffscreenTargets();
+    if (!CreateOffscreenTargets(w, h)) { return false; }
+
+    swapchain_width_  = w;
+    swapchain_height_ = h;
+    ENGINE_LOG_INFO(LogRenderer, "Recreated swapchain + offscreen targets ({}x{})", w, h);
+    return true;
+}
+
+void FRenderer::ForceRecreate() {
+    if (!initialized_) { return; }
+    RecreateSizedResources();
+}
+
 void FRenderer::RenderFrameInternal(FReadbackRequest* readback) {
     if (!initialized_) { return; }
 
+    // Resize signal (ADR-0026): recreate before acquiring.
+    if (window_->ConsumeResized()) {
+        if (!RecreateSizedResources()) { return; }
+    }
+
     const RHIAcquiredImage acquired = device_->AcquireNextSwapchainImage(swapchain_);
     if (acquired.needs_recreate) {
-        // Out-of-date swapchain; recreation lands in §6.f. Skip the frame.
+        // Vulkan's out-of-date signal: recreate and skip this frame.
+        RecreateSizedResources();
         return;
     }
     const uint32 image_index = acquired.image_index;
@@ -391,7 +421,10 @@ void FRenderer::RenderFrameInternal(FReadbackRequest* readback) {
                                                      readback->out_rgba).ok();
     }
 
-    device_->Present(swapchain_, image_index);
+    if (!device_->Present(swapchain_, image_index).ok()) {
+        // Out-of-date at present: recreate; the next frame renders fresh.
+        RecreateSizedResources();
+    }
     frame_backbuffer_ = {};
 }
 
