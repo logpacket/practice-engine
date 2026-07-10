@@ -1,6 +1,6 @@
 # Stage 2 — RenderGraph + Multi-frame
 
-**Status:** Planned.
+**Status:** Complete.
 **Headline goal (binary):** `HelloTriangle` runs in a resizable window rendering a two-pass frame driven by **RenderGraph-computed barriers** under N-frames-in-flight with timeline-semaphore sync: a **ScenePass** draws the triangle into an offscreen color+depth Texture, and a **CompositePass** samples that color Texture through a Sampler into the swapchain. On window resize the swapchain and offscreen targets recreate; on shutdown resources are reclaimed by deferred-delete with no per-frame `vkDeviceWaitIdle`. The Renderer and RenderGraph reach no Vulkan symbol or header.
 
 This stage promotes the Stage 1 simplifications (two hand-rolled barriers, one frame in flight, `vkDeviceWaitIdle` teardown, fixed-size FIFO, Buffer-only resources) into a structure a real frame can carry. It is the [Architecture.md §10](../Architecture.md) "RenderGraph + auto-barrier + multi-frame" slice.
