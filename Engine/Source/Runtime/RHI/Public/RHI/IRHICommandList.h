@@ -1,13 +1,13 @@
-// IRHICommandList.h - Stage 1 command list interface.
+// IRHICommandList.h - command list interface.
 //
-// Architecture.md §3.4. The two TransitionTo* methods are intentionally
-// backend-neutral names that map to VK_IMAGE_LAYOUT_{COLOR_ATTACHMENT_OPTIMAL,
-// PRESENT_SRC_KHR} on Vulkan and to D3D12_RESOURCE_STATE_{RENDER_TARGET, PRESENT}
-// on D3D12. They are Stage-1-only API; Stage 2 replaces them with
-// ResourceBarrier(span) once RenderGraph arrives.
+// Architecture.md §3.4. Stage 2 (ADR-0022): the Stage-1-only TransitionTo*
+// pair is replaced by the general ResourceBarrier primitive. The RHI stays
+// emit-only - it records exactly the transitions it is told, no state
+// tracking; the RenderGraph computes the schedule (ADR-0004/0023).
 
 #pragma once
 
+#include <Core/EngineAbi.hpp>
 #include <Core/Types.h>
 #include <RHI/RHITypes.h>
 
@@ -18,11 +18,9 @@ public:
     virtual void Begin() = 0;
     virtual void End()   = 0;
 
-    // Layout transitions for the swapchain color attachment. Stage 1 only.
-    virtual void TransitionToRenderTarget(RHISwapchainHandle swapchain,
-                                          uint32             swapchain_image_index) = 0;
-    virtual void TransitionToPresent(RHISwapchainHandle swapchain,
-                                     uint32             swapchain_image_index) = 0;
+    // Records the given layout/access transitions (ADR-0022). Only the
+    // RenderGraph calls this (ADR-0023).
+    virtual void ResourceBarrier(EngineSpan<const RHIResourceBarrier> barriers) = 0;
 
     virtual void BeginRenderPass(const RHIRenderPassBeginInfo& info) = 0;
     virtual void EndRenderPass() = 0;

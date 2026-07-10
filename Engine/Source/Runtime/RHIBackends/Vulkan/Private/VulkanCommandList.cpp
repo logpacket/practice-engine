@@ -1,6 +1,8 @@
 #include "VulkanCommandList.h"
 #include "VulkanDevice.h"
 
+#include <vector>
+
 namespace pe::vk {
 
 FVulkanCommandList::FVulkanCommandList(FVulkanDevice& device, VkCommandBuffer cmd) noexcept
@@ -19,81 +21,116 @@ void FVulkanCommandList::End() {
     PE_VK_CHECK(vkEndCommandBuffer(cmd_));
 }
 
-void FVulkanCommandList::TransitionToRenderTarget(RHISwapchainHandle swapchain,
-                                                  uint32_t           image_index) {
-    bound_swapchain_   = swapchain;
-    bound_image_index_ = image_index;
+namespace {
 
-    auto* sc = device_.GetSwapchainPayload(swapchain);
-    VkImage image = sc->images[image_index];
+// ERHIResourceState -> (layout, stage, access) triple (ADR-0022). The same
+// mapping serves as source scope (what to wait on) and destination scope
+// (what to make available).
+struct FStateInfo {
+    VkImageLayout         layout;
+    VkPipelineStageFlags2 stage;
+    VkAccessFlags2        access;
+};
 
-    VkImageMemoryBarrier2 barrier{};
-    barrier.sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-    barrier.srcStageMask  = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
-    barrier.srcAccessMask = 0;
-    barrier.dstStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-    barrier.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-    barrier.oldLayout     = VK_IMAGE_LAYOUT_UNDEFINED;
-    barrier.newLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image                          = image;
-    barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseMipLevel   = 0;
-    barrier.subresourceRange.levelCount     = 1;
-    barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount     = 1;
-
-    VkDependencyInfo dep{};
-    dep.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dep.imageMemoryBarrierCount = 1;
-    dep.pImageMemoryBarriers    = &barrier;
-
-    vkCmdPipelineBarrier2(cmd_, &dep);
+FStateInfo ToStateInfo(ERHIResourceState s) {
+    switch (s) {
+        case ERHIResourceState::RenderTarget:
+            return {VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT};
+        case ERHIResourceState::DepthAttachment:
+            return {VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                    VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT};
+        case ERHIResourceState::ShaderResource:
+            return {VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
+        case ERHIResourceState::CopySrc:
+            return {VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_COPY_BIT,
+                    VK_ACCESS_2_TRANSFER_READ_BIT};
+        case ERHIResourceState::CopyDst:
+            return {VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_COPY_BIT,
+                    VK_ACCESS_2_TRANSFER_WRITE_BIT};
+        case ERHIResourceState::Present:
+            // Release to the presentation engine: no stage/access - the
+            // binary semaphore handshake orders it (ADR-0027).
+            return {VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE};
+        case ERHIResourceState::Undefined:
+        default:
+            return {VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE};
+    }
 }
 
-void FVulkanCommandList::TransitionToPresent(RHISwapchainHandle swapchain,
-                                             uint32_t           image_index) {
-    auto* sc = device_.GetSwapchainPayload(swapchain);
-    VkImage image = sc->images[image_index];
+}  // namespace
 
-    VkImageMemoryBarrier2 barrier{};
-    barrier.sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-    barrier.srcStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-    barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-    barrier.dstStageMask  = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
-    barrier.dstAccessMask = 0;
-    barrier.oldLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    barrier.newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image                          = image;
-    barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseMipLevel   = 0;
-    barrier.subresourceRange.levelCount     = 1;
-    barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount     = 1;
+void FVulkanCommandList::ResourceBarrier(EngineSpan<const RHIResourceBarrier> barriers) {
+    if (barriers.size == 0) { return; }
+
+    std::vector<VkImageMemoryBarrier2> image_barriers;
+    image_barriers.reserve(barriers.size);
+    for (uint64_t i = 0; i < barriers.size; ++i) {
+        const RHIResourceBarrier& b   = barriers.data[i];
+        auto*                     tex = device_.GetTexturePayload(b.texture);
+        const FStateInfo          src = ToStateInfo(b.before);
+        const FStateInfo          dst = ToStateInfo(b.after);
+
+        VkImageMemoryBarrier2 barrier{};
+        barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        barrier.srcStageMask        = src.stage;
+        barrier.srcAccessMask       = src.access;
+        barrier.dstStageMask        = dst.stage;
+        barrier.dstAccessMask       = dst.access;
+        barrier.oldLayout           = src.layout;
+        barrier.newLayout           = dst.layout;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image               = tex->image;
+        barrier.subresourceRange.aspectMask =
+            tex->format == VK_FORMAT_D32_SFLOAT ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.layerCount = 1;
+        image_barriers.push_back(barrier);
+    }
 
     VkDependencyInfo dep{};
     dep.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dep.imageMemoryBarrierCount = 1;
-    dep.pImageMemoryBarriers    = &barrier;
+    dep.imageMemoryBarrierCount = static_cast<uint32_t>(image_barriers.size());
+    dep.pImageMemoryBarriers    = image_barriers.data();
 
     vkCmdPipelineBarrier2(cmd_, &dep);
 }
 
 void FVulkanCommandList::BeginRenderPass(const RHIRenderPassBeginInfo& info) {
-    auto* sc = device_.GetSwapchainPayload(info.swapchain);
-    const uint32_t image_index = info.swapchain_image_index;
+    std::vector<VkRenderingAttachmentInfo> color_atts;
+    color_atts.reserve(info.color_attachments.size);
+    for (uint64_t i = 0; i < info.color_attachments.size; ++i) {
+        const RHIRenderPassColorAttachment& att = info.color_attachments.data[i];
+        auto* tex = device_.GetTexturePayload(att.texture);
 
-    VkRenderingAttachmentInfo color_att{};
-    color_att.sType              = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    color_att.imageView          = sc->image_views[image_index];
-    color_att.imageLayout        = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    color_att.loadOp             = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    color_att.storeOp            = VK_ATTACHMENT_STORE_OP_STORE;
-    color_att.clearValue.color   = {{info.clear_color.rgba[0], info.clear_color.rgba[1],
-                                     info.clear_color.rgba[2], info.clear_color.rgba[3]}};
+        VkRenderingAttachmentInfo color_att{};
+        color_att.sType            = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        color_att.imageView        = tex->view;
+        color_att.imageLayout      = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color_att.loadOp           = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        color_att.storeOp          = VK_ATTACHMENT_STORE_OP_STORE;
+        color_att.clearValue.color = {{att.clear.rgba[0], att.clear.rgba[1],
+                                       att.clear.rgba[2], att.clear.rgba[3]}};
+        color_atts.push_back(color_att);
+    }
+
+    VkRenderingAttachmentInfo depth_att{};
+    if (info.depth.texture.valid()) {
+        auto* tex = device_.GetTexturePayload(info.depth.texture);
+        depth_att.sType                         = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        depth_att.imageView                     = tex->view;
+        depth_att.imageLayout                   = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        depth_att.loadOp                        = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth_att.storeOp                       = VK_ATTACHMENT_STORE_OP_STORE;
+        depth_att.clearValue.depthStencil.depth = info.depth.clear_depth;
+    }
 
     VkRect2D render_area{};
     render_area.offset = {info.render_area.x, info.render_area.y};
@@ -103,8 +140,9 @@ void FVulkanCommandList::BeginRenderPass(const RHIRenderPassBeginInfo& info) {
     ri.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO;
     ri.renderArea           = render_area;
     ri.layerCount           = 1;
-    ri.colorAttachmentCount = 1;
-    ri.pColorAttachments    = &color_att;
+    ri.colorAttachmentCount = static_cast<uint32_t>(color_atts.size());
+    ri.pColorAttachments    = color_atts.data();
+    ri.pDepthAttachment     = info.depth.texture.valid() ? &depth_att : nullptr;
 
     vkCmdBeginRendering(cmd_, &ri);
 }

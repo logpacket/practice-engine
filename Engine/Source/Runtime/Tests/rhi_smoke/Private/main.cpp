@@ -13,6 +13,7 @@
 #include <Core/Paths.h>
 
 #include <RHI/IRHIBackendModule.h>
+#include <RHI/IRHICommandList.h>
 #include <RHI/IRHIDevice.h>
 #include <RHI/RHITypes.h>
 
@@ -92,7 +93,57 @@ int main() {
     }
     ENGINE_LOG_INFO(LogRhiSmoke, "WaitIdle OK");
 
-    // Step 5: tear everything down.
+    // Step 5 (Stage 2 §6.c): texture create + transition smoke, headless.
+    // Exercises CreateTexture/CreateSampler, ResourceBarrier recording, the
+    // RHISubmitInfo submit path, and deferred-delete reclamation.
+    {
+        pe::RHITextureDesc tex_desc{};
+        tex_desc.width  = 64;
+        tex_desc.height = 64;
+        tex_desc.format = pe::ERHIFormat::R8G8B8A8_UNORM;
+        tex_desc.usage  = pe::ERHITextureUsage::RenderTarget | pe::ERHITextureUsage::Sampled;
+        const pe::RHITextureHandle texture = device->CreateTexture(tex_desc);
+        if (!texture.valid()) {
+            ENGINE_LOG_ERROR(LogRhiSmoke, "CreateTexture failed");
+            backend->DestroyDevice(device);
+            pe::ModuleLoader::UnloadModule(vkrhi);
+            pe::log::Shutdown();
+            return 5;
+        }
+
+        const pe::RHISamplerHandle sampler = device->CreateSampler(pe::RHISamplerDesc{});
+        if (!sampler.valid()) {
+            ENGINE_LOG_ERROR(LogRhiSmoke, "CreateSampler failed");
+            backend->DestroyDevice(device);
+            pe::ModuleLoader::UnloadModule(vkrhi);
+            pe::log::Shutdown();
+            return 6;
+        }
+
+        const pe::RHICommandListHandle cmd_h = device->AcquireCommandList();
+        pe::IRHICommandList*           cmd   = device->Lock(cmd_h);
+        cmd->Begin();
+        const pe::RHIResourceBarrier barriers[] = {
+            {texture, pe::ERHIResourceState::Undefined, pe::ERHIResourceState::RenderTarget},
+        };
+        cmd->ResourceBarrier({barriers, 1});
+        const pe::RHIResourceBarrier to_sampled{
+            texture, pe::ERHIResourceState::RenderTarget, pe::ERHIResourceState::ShaderResource};
+        cmd->ResourceBarrier({&to_sampled, 1});
+        cmd->End();
+
+        pe::RHISubmitInfo submit{};
+        submit.timeline_signal_value = 1;  // interior submit: no binary semaphores
+        device->Submit(cmd_h, submit);
+        device->WaitIdle();
+
+        device->Destroy(texture);
+        device->Destroy(sampler);
+        device->WaitIdle();  // drains the deferred-delete queue
+        ENGINE_LOG_INFO(LogRhiSmoke, "texture + barrier smoke OK");
+    }
+
+    // Step 6: tear everything down.
     backend->DestroyDevice(device);
     pe::ModuleLoader::UnloadModule(vkrhi);
 

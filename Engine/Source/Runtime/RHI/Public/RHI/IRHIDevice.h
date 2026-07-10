@@ -22,6 +22,15 @@ public:
     virtual RHIShaderHandle    CreateShader(const RHIShaderDesc& desc) = 0;
     virtual RHIPipelineHandle  CreateGraphicsPipeline(const RHIGraphicsPipelineDesc& desc) = 0;
     virtual RHISwapchainHandle CreateSwapchain(const RHISwapchainDesc& desc) = 0;
+    virtual RHITextureHandle   CreateTexture(const RHITextureDesc& desc) = 0;
+    virtual RHISamplerHandle   CreateSampler(const RHISamplerDesc& desc) = 0;
+
+    // Borrowed texture wrapping the given swapchain image (ADR-0021/0026):
+    // the wrapper slot is allocated at swapchain create/recreate, Destroy on
+    // it is non-owning, and recreation bumps its generation - never cache the
+    // returned handle across a RecreateSwapchain.
+    virtual RHITextureHandle GetSwapchainImageTexture(RHISwapchainHandle swapchain,
+                                                      uint32 image_index) = 0;
 
     // --- Resource destruction ---------------------------------------------
     // Deferred-delete (ADR-0021): Destroy enqueues the backend payload stamped
@@ -34,6 +43,8 @@ public:
     virtual void Destroy(RHIShaderHandle handle)    = 0;
     virtual void Destroy(RHIPipelineHandle handle)  = 0;
     virtual void Destroy(RHISwapchainHandle handle) = 0;
+    virtual void Destroy(RHITextureHandle handle)   = 0;
+    virtual void Destroy(RHISamplerHandle handle)   = 0;
 
     // --- Command lists -----------------------------------------------------
     // AcquireCommandList returns a command list from the current frame slot's

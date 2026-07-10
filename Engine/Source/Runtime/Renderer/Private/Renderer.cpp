@@ -150,20 +150,31 @@ void FRenderer::RenderFrame() {
     RHICommandListHandle cmd_h = device_->AcquireCommandList();
     IRHICommandList*     cmd   = device_->Lock(cmd_h);
 
+    // §6.c interim: the Renderer emits the two swapchain barriers itself via
+    // the new ResourceBarrier API. §6.d moves barrier emission into the
+    // RenderGraph (ADR-0022/0023).
+    const RHITextureHandle backbuffer =
+        device_->GetSwapchainImageTexture(swapchain_, image_index);
+
     cmd->Begin();
-    cmd->TransitionToRenderTarget(swapchain_, image_index);
+
+    const RHIResourceBarrier to_render_target{
+        backbuffer, ERHIResourceState::Undefined, ERHIResourceState::RenderTarget};
+    cmd->ResourceBarrier({&to_render_target, 1});
+
+    RHIRenderPassColorAttachment color_att{};
+    color_att.texture       = backbuffer;
+    color_att.clear.rgba[0] = 0.1f;
+    color_att.clear.rgba[1] = 0.1f;
+    color_att.clear.rgba[2] = 0.15f;
+    color_att.clear.rgba[3] = 1.0f;
 
     RHIRenderPassBeginInfo pass{};
-    pass.swapchain             = swapchain_;
-    pass.swapchain_image_index = image_index;
-    pass.clear_color.rgba[0]   = 0.1f;
-    pass.clear_color.rgba[1]   = 0.1f;
-    pass.clear_color.rgba[2]   = 0.15f;
-    pass.clear_color.rgba[3]   = 1.0f;
-    pass.render_area.x         = 0;
-    pass.render_area.y         = 0;
-    pass.render_area.width     = swapchain_width_;
-    pass.render_area.height    = swapchain_height_;
+    pass.color_attachments  = {&color_att, 1};
+    pass.render_area.x      = 0;
+    pass.render_area.y      = 0;
+    pass.render_area.width  = swapchain_width_;
+    pass.render_area.height = swapchain_height_;
 
     cmd->BeginRenderPass(pass);
 
@@ -188,7 +199,11 @@ void FRenderer::RenderFrame() {
     cmd->Draw(3, 0);
 
     cmd->EndRenderPass();
-    cmd->TransitionToPresent(swapchain_, image_index);
+
+    const RHIResourceBarrier to_present{
+        backbuffer, ERHIResourceState::RenderTarget, ERHIResourceState::Present};
+    cmd->ResourceBarrier({&to_present, 1});
+
     cmd->End();
 
     // Boundary submit (ADR-0027): the present owner supplies the swapchain's

@@ -16,8 +16,7 @@ public:
     void Begin() override;
     void End()   override;
 
-    void TransitionToRenderTarget(RHISwapchainHandle swapchain, uint32_t image_index) override;
-    void TransitionToPresent(RHISwapchainHandle swapchain, uint32_t image_index) override;
+    void ResourceBarrier(EngineSpan<const RHIResourceBarrier> barriers) override;
 
     void BeginRenderPass(const RHIRenderPassBeginInfo& info) override;
     void EndRenderPass() override;
@@ -29,17 +28,11 @@ public:
     void SetVertexBuffer(RHIBufferHandle buffer, uint64_t offset) override;
     void Draw(uint32_t vertex_count, uint32_t first_vertex) override;
 
-    VkCommandBuffer    Raw()             const noexcept { return cmd_; }
-    RHISwapchainHandle BoundSwapchain()  const noexcept { return bound_swapchain_; }
-    uint32_t           BoundImageIndex() const noexcept { return bound_image_index_; }
+    VkCommandBuffer Raw() const noexcept { return cmd_; }
 
 private:
     FVulkanDevice&      device_;
     VkCommandBuffer     cmd_;
-    // Set in TransitionToRenderTarget; consumed by Submit/Present so the device
-    // knows which swapchain's sync objects to use.
-    RHISwapchainHandle  bound_swapchain_   = {};
-    uint32_t            bound_image_index_ = 0;
 };
 
 }  // namespace pe::vk

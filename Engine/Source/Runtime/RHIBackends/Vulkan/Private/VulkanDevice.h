@@ -28,11 +28,17 @@ public:
     RHIShaderHandle    CreateShader(const RHIShaderDesc& desc) override;
     RHIPipelineHandle  CreateGraphicsPipeline(const RHIGraphicsPipelineDesc& desc) override;
     RHISwapchainHandle CreateSwapchain(const RHISwapchainDesc& desc) override;
+    RHITextureHandle   CreateTexture(const RHITextureDesc& desc) override;
+    RHISamplerHandle   CreateSampler(const RHISamplerDesc& desc) override;
+    RHITextureHandle   GetSwapchainImageTexture(RHISwapchainHandle swapchain,
+                                                uint32_t image_index) override;
 
     void Destroy(RHIBufferHandle handle) override;
     void Destroy(RHIShaderHandle handle) override;
     void Destroy(RHIPipelineHandle handle) override;
     void Destroy(RHISwapchainHandle handle) override;
+    void Destroy(RHITextureHandle handle) override;
+    void Destroy(RHISamplerHandle handle) override;
 
     RHICommandListHandle AcquireCommandList() override;
     IRHICommandList*     Lock(RHICommandListHandle handle) override;
@@ -48,6 +54,8 @@ public:
     VulkanSwapchainPayload* GetSwapchainPayload(RHISwapchainHandle h) { return swapchains_.Get(h); }
     VulkanBufferPayload*    GetBufferPayload(RHIBufferHandle h)       { return buffers_.Get(h); }
     VulkanPipelinePayload*  GetPipelinePayload(RHIPipelineHandle h)   { return pipelines_.Get(h); }
+    VulkanTexturePayload*   GetTexturePayload(RHITextureHandle h)     { return textures_.Get(h); }
+    VulkanSamplerPayload*   GetSamplerPayload(RHISamplerHandle h)     { return samplers_.Get(h); }
 
     VkDevice         Device()                const noexcept { return device_; }
     VkPhysicalDevice PhysicalDevice()        const noexcept { return physical_device_; }
@@ -73,6 +81,8 @@ private:
     void DestroyPipelinePayload(VulkanPipelinePayload& p);
     void DestroySwapchainPayload(VulkanSwapchainPayload& p);
     void DestroyCommandListPayload(VulkanCommandListPayload& p);
+    void DestroyTexturePayload(VulkanTexturePayload& p);
+    void DestroySamplerPayload(VulkanSamplerPayload& p);
 
     // The frame value the current recording frame's boundary submit will
     // signal (ADR-0021). Deferred deletes are stamped with this.
@@ -112,6 +122,8 @@ private:
     std::vector<FDeferred<VulkanBufferPayload>>   deferred_buffers_;
     std::vector<FDeferred<VulkanShaderPayload>>   deferred_shaders_;
     std::vector<FDeferred<VulkanPipelinePayload>> deferred_pipelines_;
+    std::vector<FDeferred<VulkanTexturePayload>>  deferred_textures_;
+    std::vector<FDeferred<VulkanSamplerPayload>>  deferred_samplers_;
 
     PFN_RHICreateSurface     create_surface_       = nullptr;
     void*                    create_surface_userdata_ = nullptr;
@@ -121,6 +133,8 @@ private:
     TResourcePool<VulkanPipelinePayload,    PipelineTag>    pipelines_;
     TResourcePool<VulkanSwapchainPayload,   SwapchainTag>   swapchains_;
     TResourcePool<VulkanCommandListPayload, CommandListTag> command_lists_;
+    TResourcePool<VulkanTexturePayload,     TextureTag>     textures_;
+    TResourcePool<VulkanSamplerPayload,     SamplerTag>     samplers_;
 };
 
 }  // namespace pe::vk

@@ -32,12 +32,16 @@ struct ShaderTag;
 struct PipelineTag;
 struct SwapchainTag;
 struct CommandListTag;
+struct TextureTag;
+struct SamplerTag;
 
 using RHIBufferHandle      = RHIHandle<BufferTag>;
 using RHIShaderHandle      = RHIHandle<ShaderTag>;
 using RHIPipelineHandle    = RHIHandle<PipelineTag>;
 using RHISwapchainHandle   = RHIHandle<SwapchainTag>;
 using RHICommandListHandle = RHIHandle<CommandListTag>;
+using RHITextureHandle     = RHIHandle<TextureTag>;
+using RHISamplerHandle     = RHIHandle<SamplerTag>;
 
 // --- Submit synchronization (ADR-0020 / ADR-0027) ----------------------------
 
@@ -83,7 +87,41 @@ enum class ERHIFormat : uint16 {
     R32G32_SFLOAT,
     R32G32B32_SFLOAT,
     R32G32B32A32_SFLOAT,
+    D32_SFLOAT,  // depth (Stage 2)
 };
+
+// Backend-neutral resource states (ADR-0022). On Vulkan each maps to a
+// (VkImageLayout, VkPipelineStageFlags2, VkAccessFlags2) triple; on D3D12 to
+// D3D12_RESOURCE_STATES. Only the RenderGraph emits transitions (ADR-0023).
+enum class ERHIResourceState : uint8 {
+    Undefined = 0,
+    RenderTarget,
+    DepthAttachment,
+    ShaderResource,
+    CopySrc,
+    CopyDst,
+    Present,
+};
+
+enum class ERHITextureUsage : uint32 {
+    None         = 0,
+    RenderTarget = 1u << 0,
+    DepthStencil = 1u << 1,
+    Sampled      = 1u << 2,
+    CopySrc      = 1u << 3,
+    CopyDst      = 1u << 4,
+};
+
+constexpr ERHITextureUsage operator|(ERHITextureUsage a, ERHITextureUsage b) noexcept {
+    return static_cast<ERHITextureUsage>(static_cast<uint32>(a) | static_cast<uint32>(b));
+}
+constexpr bool any(ERHITextureUsage a, ERHITextureUsage mask) noexcept {
+    return (static_cast<uint32>(a) & static_cast<uint32>(mask)) != 0;
+}
+
+enum class ERHIFilter      : uint8 { Nearest = 0, Linear };
+enum class ERHIAddressMode : uint8 { Repeat = 0, MirroredRepeat, ClampToEdge, ClampToBorder };
+enum class ERHIMipmapMode  : uint8 { Nearest = 0, Linear };
 
 enum class ERHIPresentMode : uint8 {
     FIFO = 0,        // V-Sync, guaranteed available (Stage 1 default)
@@ -162,12 +200,37 @@ struct RHIVertexAttribute {
     ERHIFormat format;
 };
 
+struct RHITextureDesc {
+    uint32           width  = 0;
+    uint32           height = 0;
+    ERHIFormat       format = ERHIFormat::Unknown;
+    ERHITextureUsage usage  = ERHITextureUsage::None;
+};
+
+struct RHISamplerDesc {
+    ERHIFilter      min_filter   = ERHIFilter::Linear;
+    ERHIFilter      mag_filter   = ERHIFilter::Linear;
+    ERHIAddressMode address_mode = ERHIAddressMode::ClampToEdge;
+    ERHIMipmapMode  mipmap_mode  = ERHIMipmapMode::Nearest;
+};
+
+// A layout/access transition (ADR-0022). The swapchain image is addressed as
+// a borrowed texture via IRHIDevice::GetSwapchainImageTexture, so barriers
+// operate uniformly over textures and swapchain images.
+struct RHIResourceBarrier {
+    RHITextureHandle  texture;
+    ERHIResourceState before = ERHIResourceState::Undefined;
+    ERHIResourceState after  = ERHIResourceState::Undefined;
+};
+
 struct RHIGraphicsPipelineDesc {
     RHIShaderHandle  vertex_shader;
     RHIShaderHandle  fragment_shader;
     uint32           vertex_stride;
     EngineSpan<const RHIVertexAttribute> vertex_attributes;
-    ERHIFormat       color_attachment_format;  // matches swapchain format
+    ERHIFormat       color_attachment_format;  // matches the render target format
+    // Unknown = no depth attachment; a depth format enables depth test+write.
+    ERHIFormat       depth_attachment_format = ERHIFormat::Unknown;
 };
 
 struct RHISwapchainDesc {
@@ -201,12 +264,24 @@ struct RHIClearColor {
     float32 rgba[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 };
 
+// Generalized render pass target (§6.c): texture attachments instead of a
+// swapchain reference. A pass targeting the swapchain uses the borrowed
+// texture from GetSwapchainImageTexture. Attachments are always cleared on
+// load in Stage 2 (every pass fully overwrites its targets).
+struct RHIRenderPassColorAttachment {
+    RHITextureHandle texture;
+    RHIClearColor    clear;
+};
+
+struct RHIRenderPassDepthAttachment {
+    RHITextureHandle texture;       // invalid handle = no depth attachment
+    float32          clear_depth = 1.0f;
+};
+
 struct RHIRenderPassBeginInfo {
-    // Stage 1: a single color attachment, no depth.
-    RHISwapchainHandle swapchain;
-    uint32             swapchain_image_index;   // returned by acquire-next-image
-    RHIClearColor      clear_color;
-    RHIRect            render_area;
+    EngineSpan<const RHIRenderPassColorAttachment> color_attachments = {nullptr, 0};
+    RHIRenderPassDepthAttachment                   depth;
+    RHIRect                                        render_area;
 };
 
 }  // namespace pe

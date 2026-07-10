@@ -19,6 +19,21 @@ struct VulkanShaderPayload {
     ERHIShaderStage stage  = ERHIShaderStage::Vertex;
 };
 
+struct VulkanTexturePayload {
+    VkImage        image  = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;  // VK_NULL_HANDLE when external
+    VkImageView    view   = VK_NULL_HANDLE;
+    VkFormat       format = VK_FORMAT_UNDEFINED;
+    VkExtent2D     extent = {0, 0};
+    // External = borrowed swapchain image (ADR-0021): image and view are
+    // owned by the swapchain payload; Destroy must free nothing GPU-side.
+    bool           external = false;
+};
+
+struct VulkanSamplerPayload {
+    VkSampler sampler = VK_NULL_HANDLE;
+};
+
 struct VulkanPipelinePayload {
     VkPipeline       pipeline = VK_NULL_HANDLE;
     VkPipelineLayout layout   = VK_NULL_HANDLE;
@@ -31,6 +46,9 @@ struct VulkanSwapchainPayload {
     VkExtent2D                extent     = {0, 0};
     std::vector<VkImage>      images;        // borrowed from swapchain (do not destroy)
     std::vector<VkImageView>  image_views;   // owned by us
+    // Borrowed-texture wrappers over images[] (ADR-0021/0026). Allocated at
+    // swapchain create/recreate, removed (generation bump) on destroy/recreate.
+    std::vector<RHITextureHandle> image_textures;
 
     // Stage 2 (ADR-0020): frame pacing is the device timeline semaphore; only
     // the swapchain handshake keeps binary semaphores.

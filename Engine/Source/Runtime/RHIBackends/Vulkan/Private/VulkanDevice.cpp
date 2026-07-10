@@ -76,8 +76,13 @@ VkFormat ToVkFormat(ERHIFormat f) {
         case ERHIFormat::R32G32_SFLOAT:     return VK_FORMAT_R32G32_SFLOAT;
         case ERHIFormat::R32G32B32_SFLOAT:  return VK_FORMAT_R32G32B32_SFLOAT;
         case ERHIFormat::R32G32B32A32_SFLOAT: return VK_FORMAT_R32G32B32A32_SFLOAT;
+        case ERHIFormat::D32_SFLOAT:        return VK_FORMAT_D32_SFLOAT;
         default:                            return VK_FORMAT_UNDEFINED;
     }
+}
+
+VkImageAspectFlags AspectFromVkFormat(VkFormat f) {
+    return f == VK_FORMAT_D32_SFLOAT ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
 }
 
 // Stage 1: present mode is hardcoded to FIFO (Architecture.md §3.6 policy);
@@ -124,6 +129,8 @@ FVulkanDevice::~FVulkanDevice() {
         pipelines_.ForEachLive    ([this](VulkanPipelinePayload& p)    { DestroyPipelinePayload(p); });
         shaders_.ForEachLive      ([this](VulkanShaderPayload& p)      { DestroyShaderPayload(p); });
         buffers_.ForEachLive      ([this](VulkanBufferPayload& p)      { DestroyBufferPayload(p); });
+        textures_.ForEachLive     ([this](VulkanTexturePayload& p)     { DestroyTexturePayload(p); });
+        samplers_.ForEachLive     ([this](VulkanSamplerPayload& p)     { DestroySamplerPayload(p); });
 
         for (FFrameSlot& slot : frames_) {
             if (slot.pool != VK_NULL_HANDLE) {
@@ -530,11 +537,22 @@ RHIPipelineHandle FVulkanDevice::CreateGraphicsPipeline(const RHIGraphicsPipelin
     plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     PE_VK_CHECK(vkCreatePipelineLayout(device_, &plci, nullptr, &payload.layout));
 
+    const bool has_depth = desc.depth_attachment_format != ERHIFormat::Unknown;
+
     VkFormat color_fmt = ToVkFormat(desc.color_attachment_format);
     VkPipelineRenderingCreateInfo render_info{};
     render_info.sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
     render_info.colorAttachmentCount    = 1;
     render_info.pColorAttachmentFormats = &color_fmt;
+    if (has_depth) {
+        render_info.depthAttachmentFormat = ToVkFormat(desc.depth_attachment_format);
+    }
+
+    VkPipelineDepthStencilStateCreateInfo ds{};
+    ds.sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    ds.depthTestEnable  = VK_TRUE;
+    ds.depthWriteEnable = VK_TRUE;
+    ds.depthCompareOp   = VK_COMPARE_OP_LESS_OR_EQUAL;
 
     VkGraphicsPipelineCreateInfo gpci{};
     gpci.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -546,6 +564,7 @@ RHIPipelineHandle FVulkanDevice::CreateGraphicsPipeline(const RHIGraphicsPipelin
     gpci.pViewportState      = &vp;
     gpci.pRasterizationState = &rs;
     gpci.pMultisampleState   = &ms;
+    gpci.pDepthStencilState  = has_depth ? &ds : nullptr;
     gpci.pColorBlendState    = &blend;
     gpci.pDynamicState       = &dyn;
     gpci.layout              = payload.layout;
@@ -554,6 +573,101 @@ RHIPipelineHandle FVulkanDevice::CreateGraphicsPipeline(const RHIGraphicsPipelin
                                           &payload.pipeline));
 
     return pipelines_.Insert(std::move(payload));
+}
+
+RHITextureHandle FVulkanDevice::CreateTexture(const RHITextureDesc& desc) {
+    if (desc.width == 0 || desc.height == 0 || desc.format == ERHIFormat::Unknown) {
+        ENGINE_LOG_ERROR(LogVulkanRHI, "CreateTexture: invalid desc ({}x{})", desc.width, desc.height);
+        return {};
+    }
+
+    VkImageUsageFlags usage = 0;
+    if (any(desc.usage, ERHITextureUsage::RenderTarget)) { usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT; }
+    if (any(desc.usage, ERHITextureUsage::DepthStencil)) { usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT; }
+    if (any(desc.usage, ERHITextureUsage::Sampled))      { usage |= VK_IMAGE_USAGE_SAMPLED_BIT; }
+    if (any(desc.usage, ERHITextureUsage::CopySrc))      { usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT; }
+    if (any(desc.usage, ERHITextureUsage::CopyDst))      { usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT; }
+
+    VulkanTexturePayload payload;
+    payload.format = ToVkFormat(desc.format);
+    payload.extent = {desc.width, desc.height};
+
+    VkImageCreateInfo ici{};
+    ici.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType     = VK_IMAGE_TYPE_2D;
+    ici.format        = payload.format;
+    ici.extent        = {desc.width, desc.height, 1};
+    ici.mipLevels     = 1;
+    ici.arrayLayers   = 1;
+    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage         = usage;
+    ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    PE_VK_CHECK(vkCreateImage(device_, &ici, nullptr, &payload.image));
+
+    VkMemoryRequirements req{};
+    vkGetImageMemoryRequirements(device_, payload.image, &req);
+    const uint32_t mem_type = FindMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (mem_type == UINT32_MAX) {
+        ENGINE_LOG_ERROR(LogVulkanRHI, "No device-local memory type for texture");
+        vkDestroyImage(device_, payload.image, nullptr);
+        return {};
+    }
+    VkMemoryAllocateInfo ai{};
+    ai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    ai.allocationSize  = req.size;
+    ai.memoryTypeIndex = mem_type;
+    PE_VK_CHECK(vkAllocateMemory(device_, &ai, nullptr, &payload.memory));
+    PE_VK_CHECK(vkBindImageMemory(device_, payload.image, payload.memory, 0));
+
+    VkImageViewCreateInfo ivci{};
+    ivci.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    ivci.image                           = payload.image;
+    ivci.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format                          = payload.format;
+    ivci.subresourceRange.aspectMask     = AspectFromVkFormat(payload.format);
+    ivci.subresourceRange.levelCount     = 1;
+    ivci.subresourceRange.layerCount     = 1;
+    PE_VK_CHECK(vkCreateImageView(device_, &ivci, nullptr, &payload.view));
+
+    return textures_.Insert(std::move(payload));
+}
+
+RHISamplerHandle FVulkanDevice::CreateSampler(const RHISamplerDesc& desc) {
+    const auto to_filter = [](ERHIFilter f) {
+        return f == ERHIFilter::Nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+    };
+    const auto to_address = [](ERHIAddressMode m) {
+        switch (m) {
+            case ERHIAddressMode::Repeat:         return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            case ERHIAddressMode::MirroredRepeat: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+            case ERHIAddressMode::ClampToBorder:  return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+            case ERHIAddressMode::ClampToEdge:
+            default:                              return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        }
+    };
+
+    VkSamplerCreateInfo sci{};
+    sci.sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sci.minFilter    = to_filter(desc.min_filter);
+    sci.magFilter    = to_filter(desc.mag_filter);
+    sci.mipmapMode   = desc.mipmap_mode == ERHIMipmapMode::Linear
+                           ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sci.addressModeU = to_address(desc.address_mode);
+    sci.addressModeV = to_address(desc.address_mode);
+    sci.addressModeW = to_address(desc.address_mode);
+    sci.maxLod       = VK_LOD_CLAMP_NONE;
+
+    VulkanSamplerPayload payload;
+    PE_VK_CHECK(vkCreateSampler(device_, &sci, nullptr, &payload.sampler));
+    return samplers_.Insert(std::move(payload));
+}
+
+RHITextureHandle FVulkanDevice::GetSwapchainImageTexture(RHISwapchainHandle h, uint32_t image_index) {
+    auto* p = swapchains_.Get(h);
+    ENGINE_CHECK(image_index < p->image_textures.size());
+    return p->image_textures[image_index];
 }
 
 RHISwapchainHandle FVulkanDevice::CreateSwapchain(const RHISwapchainDesc& desc) {
@@ -668,7 +782,21 @@ RHISwapchainHandle FVulkanDevice::CreateSwapchain(const RHISwapchainDesc& desc) 
         PE_VK_CHECK(vkCreateImageView(device_, &ivci, nullptr, &payload.image_views[i]));
     }
 
-    // 5. Sync objects (ADR-0020): binary semaphores survive only at the
+    // 5. Borrowed-texture wrappers (ADR-0021/0026): one pool slot per image,
+    //    allocated here (not per GetSwapchainImageTexture call). Image and
+    //    view stay owned by this payload; the wrapper is external.
+    payload.image_textures.resize(got_count);
+    for (uint32_t i = 0; i < got_count; ++i) {
+        VulkanTexturePayload wrapper;
+        wrapper.image    = payload.images[i];
+        wrapper.view     = payload.image_views[i];
+        wrapper.format   = chosen.format;
+        wrapper.extent   = payload.extent;
+        wrapper.external = true;
+        payload.image_textures[i] = textures_.Insert(std::move(wrapper));
+    }
+
+    // 6. Sync objects (ADR-0020): binary semaphores survive only at the
     //    swapchain boundary - image_available per frame slot (the timeline
     //    wait at frame start guarantees the slot's previous acquire semaphore
     //    was consumed), render_finished per image (the presentation engine may
@@ -706,7 +834,31 @@ void FVulkanDevice::DestroyPipelinePayload(VulkanPipelinePayload& p) {
     if (p.layout != VK_NULL_HANDLE)   { vkDestroyPipelineLayout(device_, p.layout, nullptr); p.layout = VK_NULL_HANDLE; }
 }
 
+void FVulkanDevice::DestroyTexturePayload(VulkanTexturePayload& p) {
+    if (p.external) {
+        // Borrowed swapchain image (ADR-0021): image and view are owned by the
+        // swapchain payload - free nothing here.
+        p = VulkanTexturePayload{};
+        return;
+    }
+    if (p.view != VK_NULL_HANDLE)   { vkDestroyImageView(device_, p.view, nullptr); p.view = VK_NULL_HANDLE; }
+    if (p.image != VK_NULL_HANDLE)  { vkDestroyImage(device_, p.image, nullptr); p.image = VK_NULL_HANDLE; }
+    if (p.memory != VK_NULL_HANDLE) { vkFreeMemory(device_, p.memory, nullptr); p.memory = VK_NULL_HANDLE; }
+}
+
+void FVulkanDevice::DestroySamplerPayload(VulkanSamplerPayload& p) {
+    if (p.sampler != VK_NULL_HANDLE) { vkDestroySampler(device_, p.sampler, nullptr); p.sampler = VK_NULL_HANDLE; }
+}
+
 void FVulkanDevice::DestroySwapchainPayload(VulkanSwapchainPayload& p) {
+    // Remove the borrowed-texture wrappers first: bumps their generation so a
+    // cached handle from before destroy/recreate is a Debug FATAL (ADR-0026).
+    for (RHITextureHandle t : p.image_textures) {
+        auto wrapper = textures_.Remove(t);
+        DestroyTexturePayload(wrapper);  // external: no-op on GPU objects
+    }
+    p.image_textures.clear();
+
     for (VkSemaphore s : p.render_finished_per_image) {
         if (s != VK_NULL_HANDLE) { vkDestroySemaphore(device_, s, nullptr); }
     }
@@ -749,6 +901,12 @@ void FVulkanDevice::Destroy(RHISwapchainHandle h) {
     auto p = swapchains_.Remove(h);
     DestroySwapchainPayload(p);
 }
+void FVulkanDevice::Destroy(RHITextureHandle h) {
+    deferred_textures_.push_back({CurrentFrameValue(), textures_.Remove(h)});
+}
+void FVulkanDevice::Destroy(RHISamplerHandle h) {
+    deferred_samplers_.push_back({CurrentFrameValue(), samplers_.Remove(h)});
+}
 
 void FVulkanDevice::DrainDeferred(uint64_t completed) {
     const auto drain = [completed](auto& queue, auto&& destroy_fn) {
@@ -765,6 +923,8 @@ void FVulkanDevice::DrainDeferred(uint64_t completed) {
     drain(deferred_buffers_,   [this](VulkanBufferPayload& p)   { DestroyBufferPayload(p); });
     drain(deferred_shaders_,   [this](VulkanShaderPayload& p)   { DestroyShaderPayload(p); });
     drain(deferred_pipelines_, [this](VulkanPipelinePayload& p) { DestroyPipelinePayload(p); });
+    drain(deferred_textures_,  [this](VulkanTexturePayload& p)  { DestroyTexturePayload(p); });
+    drain(deferred_samplers_,  [this](VulkanSamplerPayload& p)  { DestroySamplerPayload(p); });
 }
 
 // ----- Command lists -----
