@@ -27,6 +27,14 @@ Format: [Michael Nygard short-form ADR](https://github.com/joelparkerhenderson/a
 | [0017](0017-runtime-loadable-pal-backend.md) | PAL backends are runtime-loadable (symmetric with RHI) | Superseded by [0018](0018-configure-time-pal-static-link.md) |
 | [0018](0018-configure-time-pal-static-link.md) | PAL backends — configure-time STATIC link with interface/implementation separation | Accepted |
 | [0019](0019-backend-group-directories.md) | Backend modules live in group directories (`Platforms/`, `RHIBackends/`) | Accepted |
+| [0020](0020-timeline-semaphores-primary-sync.md) | Timeline semaphores are the primary CPU↔GPU sync; binary semaphores only for swapchain interop | Accepted (Stage 2) |
+| [0021](0021-handle-generation-and-deferred-delete.md) | Handle generation counter + deferred-delete queue (handle widened 32→64-bit) | Accepted (Stage 2) |
+| [0022](0022-resource-barrier-replaces-transition.md) | `ResourceBarrier(span)` + `ERHIResourceState` replaces Stage-1-only `TransitionTo*` | Accepted (Stage 2) |
+| [0023](0023-render-graph-minimum-scope.md) | RenderGraph minimum scope — declarative pass I/O + topo schedule; no aliasing/async-compute/multi-queue | Accepted (Stage 2) |
+| [0024](0024-minimal-texture-binding.md) | Minimal texture binding (single static descriptor set, combined image sampler); bindless deferred to Stage 5 | Accepted (Stage 2) |
+| [0025](0025-asset-system-v1-scope.md) | Asset system v1 scope — synchronous, in-memory, no cooking/streaming/decoders | Accepted (Stage 2) |
+| [0026](0026-swapchain-recreation-and-resize.md) | Swapchain recreation + `IWindow` resize signaling; Renderer owns acquire/present, RenderGraph owns barriers | Accepted (Stage 2) |
+| [0027](0027-submit-sync-contract.md) | Submit sync contract — explicit `RHISubmitInfo`; binary semaphores supplied by Renderer only at the boundary submit | Accepted (Stage 2) |
 
 ## When to add an ADR
 

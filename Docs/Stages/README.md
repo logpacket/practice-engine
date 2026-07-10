@@ -9,7 +9,7 @@ The vision lives in [`../Architecture.md`](../Architecture.md). The reasoning be
 | Stage | Title | Status | Headline goal |
 |---|---|---|---|
 | [1](Stage1.md) | Walking skeleton | Complete | Run `HelloTriangle`: dynamically loaded VulkanRHI draws a colored triangle through the RHI abstraction; Renderer reaches no Vulkan symbol or header |
-| 2 | RenderGraph + multi-frame | Planned | Auto-barrier RenderGraph, MAILBOX present, multi-frames-in-flight, deferred-delete, Texture/Sampler API, swapchain recreation on resize, Asset system v1 |
+| [2](Stage2.md) | RenderGraph + multi-frame | Planned | Auto-barrier RenderGraph, MAILBOX present, multi-frames-in-flight, deferred-delete, Texture/Sampler API, swapchain recreation on resize, Asset system v1 |
 | 3 | ECS + gameplay + hot reload | Planned | Archetype ECS storage + Actor/Component public API, hot reload state machine, ABI strict-guard enforcement promotion, ShaderCompiler module, gameplay↔RHI isolation gate |
 | 4 | Editor + PIE | Planned | ImGui editor, PIE (Play-In-Editor), multi-swapchain/offscreen RHI surface additions, reflection mechanism (UHT replacement) |
 | 5 | D3D12 backend | Planned | D3D12RHI implementation, real-world validation of RHI Vulkan-ism removal, BindGroup model redesign (root signature alignment) |
